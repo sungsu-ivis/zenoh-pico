@@ -89,6 +89,19 @@ if(UNIX)
         add_example(z_get_lat unix/c11/z_get_lat.c)
         add_example(z_queryable_lat unix/c11/z_queryable_lat.c THREADS)
     endif()
+
+    # z_perf is one measurement pair (same measurement as the brightonz.foundation z_perf example).
+    # It only uses the C99 API, so it builds with either C standard. Both executables and the run
+    # script share one folder: z_perf/bin/{z_perf_tester,z_perf_peer} and z_perf/test_start.sh.
+    find_package(Threads REQUIRED)
+    add_example(z_perf_tester unix/c99/z_perf/main.c)
+    add_example(z_perf_peer unix/c99/z_perf/main_peer.c)
+    foreach(z_perf_target IN ITEMS z_perf_tester z_perf_peer)
+        target_sources(${z_perf_target} PRIVATE unix/c99/z_perf/perf_measure.c unix/c99/z_perf/perf_max_throughput.c)
+        target_link_libraries(${z_perf_target} PRIVATE Threads::Threads)
+        set_target_properties(${z_perf_target} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/z_perf/bin")
+    endforeach()
+    configure_file(unix/c99/z_perf/test_start.sh "${CMAKE_CURRENT_BINARY_DIR}/z_perf/test_start.sh" COPYONLY)
 elseif(MSVC)
     add_example(z_put windows/z_put.c)
     add_example(z_pub windows/z_pub.c)
