@@ -21,7 +21,7 @@
 #define PERF_PEER_NAME "a"
 
 /* 측정 설정 */
-#define PERF_LOCATOR "udp/239.192.0.78:19153#iface=eth0" /* multicast 그룹과 이 PC의 NIC */
+#define PERF_LOCATOR "udp/239.192.0.78:19153#iface=enp7s0" /* multicast 그룹과 이 PC의 NIC */
 #define PERF_DRAIN_S 2u                                   /* 송신을 멈춘 뒤 늦게 오는 메시지를 기다리는 시간 (초) */
 #define PERF_IS_PUBLISHER false                           /* true: 보내는 쪽(최대 처리량 탐색), false: 받는 쪽 */
 

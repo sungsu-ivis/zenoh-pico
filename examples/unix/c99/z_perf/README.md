@@ -12,12 +12,14 @@ brightonz.foundation의 z_perf 예제와 같은 측정이다. 탐색·판정 코
 ## 1. 준비 (두 PC)
 
 1. 두 PC의 NIC를 케이블이나 스위치로 연결하고, 같은 서브넷의 IPv4를 준다 (예: `192.168.77.1/24`, `192.168.77.2/24`).
+   직결 케이블에서 자동으로 잡히는 링크 로컬 주소(`169.254.x.x/16`)도 된다.
 2. 방화벽을 쓰면 UDP 19153과 multicast를 허용한다.
 3. NIC 이름을 확인한다: `ip -br link`
 
 ## 2. NIC 이름 바꾸기
 
 각 PC에서 자기 역할 파일의 `PERF_LOCATOR`에서 `#iface=` 뒤를 그 PC의 NIC 이름으로 바꾼다.
+지금 값은 `enp7s0`이다 (두 PC의 NIC 이름이 같으면 그대로 쓴다).
 
 | PC | 파일 |
 |---|---|
@@ -25,7 +27,7 @@ brightonz.foundation의 z_perf 예제와 같은 측정이다. 탐색·판정 코
 | 받는 쪽 (B) | `main_peer.c` |
 
 ```c
-#define PERF_LOCATOR "udp/239.192.0.78:19153#iface=eth0"
+#define PERF_LOCATOR "udp/239.192.0.78:19153#iface=enp7s0"
 ```
 
 ## 3. 빌드 (두 PC 모두 같은 옵션)
@@ -33,7 +35,7 @@ brightonz.foundation의 z_perf 예제와 같은 측정이다. 탐색·판정 코
 저장소 최상위에서:
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBATCH_MULTICAST_SIZE=1450 -DBUILD_SHARED_LIBS=OFF
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBATCH_MULTICAST_SIZE=1450 -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF
 cmake --build build --target z_perf_tester z_perf_peer
 ```
 
@@ -45,19 +47,26 @@ cmake --build build --target z_perf_tester z_perf_peer
 
 ## 4. 실행 (받는 쪽을 먼저)
 
+저장소 최상위에서 (`cd`가 실패하면 실행하지 않도록 `&&`로 잇는다):
+
 ```sh
 # 받는 쪽 PC (먼저)
-./build/examples/z_perf/test_start.sh peer ~/zperf_logs
+cd ~/workspace/zenoh-pico && ./build/examples/z_perf/test_start.sh peer ~/zperf_logs/zp
 
 # 보내는 쪽 PC
-./build/examples/z_perf/test_start.sh tester ~/zperf_logs
+cd ~/workspace/zenoh-pico && ./build/examples/z_perf/test_start.sh tester ~/zperf_logs/zp
 ```
 
 - 3회 측정해 중앙값을 보고한다. 한 회차는 6~10분, 전체는 약 30분 걸린다. 측정 중에는 두 PC를 쓰지 않는다.
 - 결과는 보내는 쪽 PC의 `result_summary.txt`에 있다. 회차별 로그는 `tester_log_N.txt`, `peer_log_N.txt`.
 - 스크립트는 바이너리에 든 `#iface=`로 NIC를 확인한다. NIC가 없거나 꺼져 있거나 `lo`이면 시작하지 않는다.
-- 측정 조건(커널, CPU, 클럭 정책, 터보, NIC 속도·MTU·IP·드라이버)과 회차별 UDP 카운터 증가분을 로그와 요약에 남긴다.
-- CPU 고정 번호는 `test_start.sh` 위쪽의 `TESTER_CPU`, `PEER_CPU`에서 바꾼다.
+- 두 PC 모두 같은 CPU(`PIN_CPU=3`)에 프로그램을 묶는다.
+- 측정 전에 모든 CPU의 주파수 정책을 `performance`, 터보를 끔으로 맞춘다 (`CPU_GOVERNOR`, `TURBO`).
+  sudo 비밀번호를 물을 수 있고, 맞추지 못하면 측정하지 않는다. 측정이 끝나도 되돌리지 않는다 (재부팅하면 원래대로).
+- 측정 조건(커널, CPU, CPU 고정, 클럭 정책, 터보, NIC 속도·MTU·IP·드라이버)과 회차별 UDP 카운터 증가분을 로그와 요약에 남긴다.
+  두 PC의 로그 첫 줄이 `CPU 고정 …=3 | 클럭 정책 performance | 터보 끔`인지 확인한다.
+- `test_start.sh`를 고쳤거나 받은 뒤에는 `cmake --build build --target z_perf_tester z_perf_peer`를 다시 해야
+  `build/examples/z_perf/test_start.sh`(빌드 때 복사한 사본)에 반영된다.
 
 ## 5. 주의
 

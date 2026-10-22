@@ -15,6 +15,12 @@
 #
 # CPU 고정 (iperf3 -A와 같은 방식)
 #   프로그램을 CPU 하나에 묶어 띄운다. 송신 스레드가 CPU를 옮겨 다니면 결과가 흔들린다.
+#   두 PC 모두 같은 번호(PIN_CPU)의 CPU에 묶는다.
+#
+# 클럭 설정
+#   측정 전에 모든 CPU의 주파수 정책(CPU_GOVERNOR)과 터보(TURBO)를 정해진 값으로 맞춘다 (sudo 필요).
+#   두 PC의 클럭 조건이 같아야 결과를 비교할 수 있다. 맞추지 못하면 측정하지 않는다.
+#   측정이 끝나도 되돌리지 않는다 (재부팅하거나 직접 되돌린다).
 #
 # 결과 보고 (중앙값)
 #   실행마다 결과가 흔들리는 환경에서는 한 번의 값보다 여러 번의 중앙값이 대표값으로 낫다.
@@ -47,9 +53,11 @@ SUMMARY="${LOG_DIR}/result_summary.txt"
 RUNS=3       # 측정 횟수 (홀수, 두 PC가 같아야 한다). 결과는 중앙값으로 보고한다
 RUN_GAP_S=15 # tester: 회차 사이에 쉬는 시간. 받는 쪽이 이전 회차를 끝내고(count가 끊긴 뒤 약 7초) 다시 뜨는 시간보다 길어야 한다
 
-PIN_CPUS=1   # 1: CPU 고정, 0: 고정하지 않음
-TESTER_CPU=3 # 보내는 쪽 PC에서 z_perf_tester를 묶을 CPU 번호
-PEER_CPU=2   # 받는 쪽 PC에서 z_perf_peer를 묶을 CPU 번호
+PIN_CPUS=1 # 1: CPU 고정, 0: 고정하지 않음
+PIN_CPU=3  # 프로그램을 묶을 CPU 번호 (두 PC가 같은 번호를 쓴다)
+
+CPU_GOVERNOR=performance # 측정 전에 맞출 주파수 정책 (모든 CPU)
+TURBO=off                # 측정 전에 맞출 터보(부스트): off 또는 on
 
 # NIC 이름을 바꿀 곳 (빌드 전에 고친다)
 IFACE_SOURCE="main.c(보내는 쪽), main_peer.c(받는 쪽)의 PERF_LOCATOR #iface="
@@ -58,12 +66,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 case "$ROLE" in
     tester)
         EXE="${SCRIPT_DIR}/bin/z_perf_tester"
-        PIN_CPU=$TESTER_CPU
         LOG_PREFIX="tester_log"
         ;;
     peer)
         EXE="${SCRIPT_DIR}/bin/z_perf_peer"
-        PIN_CPU=$PEER_CPU
         LOG_PREFIX="peer_log"
         ;;
     *)
@@ -131,6 +137,46 @@ if [ "$PIN_CPUS" -eq 1 ]; then
     launch=(taskset -c "$PIN_CPU")
 fi
 
+if pgrep -x "$(basename "$EXE")" >/dev/null; then
+    echo "$(basename "$EXE")가 이미 실행 중입니다. 먼저 끝내 주세요." >&2
+    exit 1
+fi
+
+# 클럭 설정 맞추기: 모든 CPU의 주파수 정책과 터보를 위에서 정한 값으로 바꾸고(sudo), 다시 읽어 확인한다.
+# cpufreq가 없는 환경(WSL, VM 등)은 바꿀 수 없으므로 경고만 하고 측정한다.
+governor_files=(/sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor)
+turbo_file=""
+turbo_want=""
+if [ -e /sys/devices/system/cpu/intel_pstate/no_turbo ]; then
+    turbo_file=/sys/devices/system/cpu/intel_pstate/no_turbo # 1이면 터보 끔
+    turbo_want=$([ "$TURBO" = "off" ] && echo 1 || echo 0)
+elif [ -e /sys/devices/system/cpu/cpufreq/boost ]; then
+    turbo_file=/sys/devices/system/cpu/cpufreq/boost # 1이면 부스트 켬
+    turbo_want=$([ "$TURBO" = "off" ] && echo 0 || echo 1)
+fi
+turbo_label=$([ "$TURBO" = "off" ] && echo 끔 || echo 켬)
+read_clock() {
+    governor_now="$(sort -u "${governor_files[@]}" | tr '\n' ' ' | sed 's/ $//')"
+    turbo_now="$([ -n "$turbo_file" ] && cat "$turbo_file")"
+}
+if [ ! -e "${governor_files[0]}" ]; then
+    echo "경고: 이 환경에서는 주파수 정책을 바꿀 수 없습니다 (cpufreq 없음). 클럭 설정 없이 측정합니다." >&2
+else
+    read_clock
+    if [ "$governor_now" != "$CPU_GOVERNOR" ] || [ "$turbo_now" != "$turbo_want" ]; then
+        echo "클럭 설정을 주파수 정책 ${CPU_GOVERNOR}, 터보 ${turbo_label}으로 맞춥니다 (지금: 정책 ${governor_now}, ${turbo_file:-터보 설정 없음} = ${turbo_now:-?})."
+        echo "sudo 비밀번호를 물을 수 있습니다. 측정이 끝나도 이 설정은 그대로 둡니다."
+        echo "$CPU_GOVERNOR" | sudo tee "${governor_files[@]}" >/dev/null
+        [ -n "$turbo_file" ] && echo "$turbo_want" | sudo tee "$turbo_file" >/dev/null
+        read_clock
+    fi
+    if [ "$governor_now" != "$CPU_GOVERNOR" ] || [ "$turbo_now" != "$turbo_want" ]; then
+        echo "클럭 설정을 맞추지 못해 측정하지 않습니다 (정책 ${governor_now}, ${turbo_file:-터보 설정 없음} = ${turbo_now:-?})." >&2
+        echo "쓸 수 있는 정책: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors 2>/dev/null)" >&2
+        exit 1
+    fi
+fi
+
 # 측정 조건 한 줄 (로그와 요약 맨 위에 남긴다)
 is_wsl=0
 grep -qi microsoft /proc/version 2>/dev/null && is_wsl=1
@@ -152,10 +198,6 @@ fi
 conditions="# 측정 조건 (${ROLE}): $(date '+%Y-%m-%d %H:%M:%S') | $(hostname) | 커널 $(uname -r) | ${cpu_model} | CPU $(nproc)개 | ${pin_text} | 클럭 정책 ${governor} | ${turbo_text} | ${nic_text} | ${endpoint}"
 [ "$is_wsl" -eq 1 ] && conditions="${conditions} | WSL2"
 
-if pgrep -x "$(basename "$EXE")" >/dev/null; then
-    echo "$(basename "$EXE")가 이미 실행 중입니다. 먼저 끝내 주세요." >&2
-    exit 1
-fi
 mkdir -p "$LOG_DIR" || exit 1
 
 child_pid=""
