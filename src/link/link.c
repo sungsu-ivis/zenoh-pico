@@ -16,6 +16,11 @@
 
 #include <stddef.h>
 
+#if defined(ZENOH_LINUX) || defined(ZENOH_MACOS) || defined(ZENOH_BSD)
+#include <errno.h>
+#include <poll.h>
+#endif
+
 #include "zenoh-pico/config.h"
 #include "zenoh-pico/link/config/raweth.h"
 #include "zenoh-pico/link/manager.h"
@@ -208,22 +213,36 @@ z_result_t _z_link_send_wbuf(const _z_link_t *link, const _z_wbuf_t *wbf, _z_sys
 
     for (size_t i = 0; (i < _z_wbuf_len_iosli(wbf)) && (ret == _Z_RES_OK); i++) {
         _z_slice_t bs = _z_iosli_to_bytes(_z_wbuf_get_iosli(wbf, i));
-        size_t n = bs.len;
-        do {
-            size_t wb = link->_write_f(link, bs.start, n, socket);
+        size_t off = 0;
+#if defined(ZENOH_LINUX) || defined(ZENOH_MACOS) || defined(ZENOH_BSD)
+        int full_waits = 0;
+#endif
+        while (off < bs.len) {
+            size_t n = bs.len - off;
+            size_t wb = link->_write_f(link, bs.start + off, n, socket);
+#if defined(ZENOH_LINUX) || defined(ZENOH_MACOS) || defined(ZENOH_BSD)
+            // peer 모드 TCP 소켓은 non-blocking이라 송신 버퍼가 차면 일부만 쓰이거나 EAGAIN이 난다.
+            // 여기서 끊으면 메시지 앞부분만 나가 받는 쪽 스트림이 어긋나므로, 쓸 수 있을 때까지 기다렸다가
+            // 나머지를 이어서 보낸다 (BLOCK 혼잡 제어). 10초 동안 전혀 못 쓰면 실패로 본다
+            if (link_is_streamed && (wb == SIZE_MAX) && ((errno == EAGAIN) || (errno == EWOULDBLOCK))) {
+                const _z_sys_net_socket_t *sock = (socket != NULL) ? socket : _z_link_get_socket(link);
+                struct pollfd pfd = {.fd = sock->_fd, .events = POLLOUT, .revents = 0};
+                if ((poll(&pfd, 1, 1000) == 0) && (++full_waits >= 10)) {
+                    _Z_ERROR_LOG(_Z_ERR_TRANSPORT_TX_FAILED);
+                    ret = _Z_ERR_TRANSPORT_TX_FAILED;
+                    break;
+                }
+                continue;
+            }
+            full_waits = 0;
+#endif
             if ((wb == SIZE_MAX) || (wb > n)) {
                 _Z_ERROR_LOG(_Z_ERR_TRANSPORT_TX_FAILED);
                 ret = _Z_ERR_TRANSPORT_TX_FAILED;
                 break;
             }
-            if (link_is_streamed && wb != n) {
-                _Z_ERROR_LOG(_Z_ERR_TRANSPORT_TX_FAILED);
-                ret = _Z_ERR_TRANSPORT_TX_FAILED;
-                break;
-            }
-            n = n - wb;
-            bs.start = bs.start + (bs.len - n);
-        } while (n > (size_t)0);
+            off += wb;
+        }
     }
 
     return ret;

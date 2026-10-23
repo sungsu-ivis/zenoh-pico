@@ -223,6 +223,9 @@ static int _z_unicast_peer_read(_z_transport_unicast_t *ztu, _z_transport_peer_u
                     }
                     peer->flow_curr_size += (uint16_t)(_z_zbuf_read(&ztu->_common._zbuf) << 8);
                     *to_read = peer->flow_curr_size;
+                    // 길이 2바이트를 다 읽었으니 상태를 되돌린다. 그대로 두면 이 메시지 뒤에 남은 데이터가 없을 때
+                    // 다음 읽기의 첫 바이트를 길이의 상위 바이트로 읽어 스트림이 어긋난다
+                    peer->flow_state = _Z_FLOW_STATE_INACTIVE;
                     if (_z_zbuf_len(&ztu->_common._zbuf) < *to_read) {
                         peer->flow_state = _Z_FLOW_STATE_PENDING_DATA;
                         peer->flow_buff = _z_zbuf_make(peer->flow_curr_size);
