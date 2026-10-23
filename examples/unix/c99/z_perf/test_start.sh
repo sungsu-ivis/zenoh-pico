@@ -4,6 +4,8 @@
 # 보내는 쪽(제어기 A, z_perf_tester)과 받는 쪽(제어기 B, z_perf_peer)을 서로 다른 PC에서 띄운다.
 # 같은 PC 안(loopback)에서는 패킷이 NIC 드라이버를 거치지 않으므로 측정하지 않는다.
 # 두 PC는 UDP multicast 그룹 하나로 주고받는다. 그룹 주소와 NIC는 main.c / main_peer.c의 PERF_LOCATOR에 있고 바이너리에 그대로 들어간다.
+# TCP unicast로 잴 때는 build/examples/z_perf_tcp/의 이 스크립트를 쓴다 (같은 스크립트, TCP로 빌드한 bin/).
+#   받는 쪽이 자기 IP로 TCP 연결을 기다리고, 보내는 쪽이 그 IP로 접속한다. 받는 쪽 IP는 endpoint(tcp/IP:포트)에 있다.
 #
 # 순서
 #   1. 받는 쪽 PC  : ./test_start.sh peer [로그 폴더]
@@ -28,7 +30,7 @@
 #   30초 확인을 통과하지 못한 회차는 "확인 실패"로 표시하고, 그 회차의 탐색 결과를 그대로 쓴다.
 #
 # 측정 조건 기록
-#   이 PC의 커널, CPU, 클럭 정책, NIC(이름·속도·MTU·IPv4·드라이버), multicast endpoint를 로그와 요약 맨 위에 남긴다.
+#   이 PC의 커널, CPU, 클럭 정책, NIC(이름·속도·MTU·IPv4·드라이버), endpoint를 로그와 요약 맨 위에 남긴다.
 #   회차마다 커널 UDP 카운터의 증가분(보낸·받은 데이터그램, 수신 버퍼 부족으로 버린 수)도 요약에 남긴다.
 #
 # 사용법: ./test_start.sh tester|peer [로그 폴더]
@@ -59,8 +61,9 @@ PIN_CPU=3  # 프로그램을 묶을 CPU 번호 (두 PC가 같은 번호를 쓴�
 CPU_GOVERNOR=performance # 측정 전에 맞출 주파수 정책 (모든 CPU)
 TURBO=off                # 측정 전에 맞출 터보(부스트): off 또는 on
 
-# NIC 이름을 바꿀 곳 (빌드 전에 고친다)
+# NIC 이름(multicast)과 받는 쪽 IP(TCP)를 바꿀 곳 (빌드 전에 고친다)
 IFACE_SOURCE="main.c(보내는 쪽), main_peer.c(받는 쪽)의 PERF_LOCATOR #iface="
+TCP_IP_SOURCE="main.c(보내는 쪽), main_peer.c(받는 쪽)의 TCP PERF_LOCATOR tcp/IP"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 case "$ROLE" in
@@ -90,16 +93,46 @@ if [ "$RUNS" -lt 1 ] || [ $((RUNS % 2)) -ne 1 ]; then
     exit 1
 fi
 
-# multicast endpoint와 NIC: 바이너리에 들어 있는 endpoint 문자열에서 읽는다 (PERF_LOCATOR가 그대로 컴파일된다)
+# endpoint와 NIC: 바이너리에 들어 있는 endpoint 문자열에서 읽는다 (PERF_LOCATOR가 그대로 컴파일된다)
+#   UDP multicast: udp/그룹:포트#iface=NIC → NIC는 #iface= 값
+#   TCP unicast  : tcp/받는쪽IP:포트       → 받는 쪽은 그 IP를 가진 NIC, 보내는 쪽은 그 IP로 가는 경로의 NIC
 endpoint="$(grep -a -o 'udp/[0-9.]*:[0-9]*#iface=[A-Za-z0-9_.:-]*' "$EXE" | head -n 1)"
-if [ -z "$endpoint" ]; then
-    echo "바이너리에서 multicast endpoint(udp/주소:포트#iface=NIC)를 찾지 못했습니다: $EXE" >&2
-    exit 1
+if [ -n "$endpoint" ]; then
+    nic="${endpoint##*#iface=}"
+else
+    endpoint="$(grep -a -o 'tcp/[0-9][0-9.]*:[0-9][0-9]*' "$EXE" | head -n 1)"
+    if [ -z "$endpoint" ]; then
+        echo "바이너리에서 endpoint(udp/주소:포트#iface=NIC 또는 tcp/IP:포트)를 찾지 못했습니다: $EXE" >&2
+        exit 1
+    fi
+    tcp_ip="${endpoint#tcp/}"
+    tcp_ip="${tcp_ip%:*}"
+    own_nic="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$tcp_ip" '{ split($4, a, "/"); if (a[1] == ip) { print $2; exit } }')"
+    if [ "$ROLE" = "peer" ]; then
+        # 받는 쪽: 이 PC가 그 IP를 가지고 있어야 그 IP로 연결을 기다릴 수 있다
+        if [ -z "$own_nic" ]; then
+            echo "이 PC에 TCP 주소 ${tcp_ip}이(가) 없습니다. 이 PC의 IPv4: $(ip -o -4 addr show | awk '{print $4}' | tr '\n' ' ')" >&2
+            echo "${TCP_IP_SOURCE}를 받는 쪽 PC의 IP로 바꾸고 두 PC 모두 다시 빌드하세요." >&2
+            exit 1
+        fi
+        nic="$own_nic"
+    elif [ -n "$own_nic" ]; then
+        nic="lo" # 보내는 쪽이 자기 IP로 접속하면 같은 PC 안(loopback)이다
+    else
+        nic="$(ip -o route get "$tcp_ip" 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')"
+        if [ -z "$nic" ]; then
+            echo "TCP 주소 ${tcp_ip}로 가는 경로(NIC)를 찾지 못했습니다. 케이블과 IP 설정을 확인하세요." >&2
+            exit 1
+        fi
+    fi
 fi
-nic="${endpoint##*#iface=}"
 if [ "$nic" = "lo" ]; then
     echo "NIC가 lo(loopback)입니다. loopback은 NIC 드라이버를 거치지 않으므로 측정에 쓰지 않습니다." >&2
-    echo "${IFACE_SOURCE}를 이 PC의 NIC 이름으로 바꾸고 다시 빌드하세요." >&2
+    if [ "${endpoint#tcp/}" != "$endpoint" ]; then
+        echo "${TCP_IP_SOURCE}를 다른 PC(받는 쪽)의 IP로 바꾸고 다시 빌드하세요." >&2
+    else
+        echo "${IFACE_SOURCE}를 이 PC의 NIC 이름으로 바꾸고 다시 빌드하세요." >&2
+    fi
     exit 1
 fi
 if [ "$nic" = "auto" ]; then
