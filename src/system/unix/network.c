@@ -574,6 +574,26 @@ z_result_t _z_open_udp_multicast(_z_sys_net_socket_t *sock, const _z_sys_net_end
             }
 #endif
 
+#if defined(Z_FEATURE_MULTICAST_LOOPBACK) && Z_FEATURE_MULTICAST_LOOPBACK == 0
+            // Do not deliver our own datagrams to sockets on this host: the read path would only discard them.
+            // This also hides them from other processes on this host that joined the same group.
+            if (lsockaddr->sa_family == AF_INET) {
+                unsigned char loop = 0;
+                if ((ret == _Z_RES_OK) &&
+                    (setsockopt(sock->_fd, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop)) < 0)) {
+                    _Z_ERROR_LOG(_Z_ERR_GENERIC);
+                    ret = _Z_ERR_GENERIC;
+                }
+            } else if (lsockaddr->sa_family == AF_INET6) {
+                unsigned int loop = 0;
+                if ((ret == _Z_RES_OK) &&
+                    (setsockopt(sock->_fd, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &loop, sizeof(loop)) < 0)) {
+                    _Z_ERROR_LOG(_Z_ERR_GENERIC);
+                    ret = _Z_ERR_GENERIC;
+                }
+            }
+#endif
+
             // Create lep endpoint
             if (ret == _Z_RES_OK) {
                 struct addrinfo *laddr = (struct addrinfo *)z_malloc(sizeof(struct addrinfo));

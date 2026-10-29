@@ -276,6 +276,7 @@ set(Z_FEATURE_RX_CACHE 0 CACHE STRING "Toggle RX_CACHE")
 set(Z_FEATURE_UNICAST_PEER 1 CACHE STRING "Toggle Unicast peer mode")
 set(Z_FEATURE_AUTO_RECONNECT 1 CACHE STRING "Toggle automatic reconnection")
 set(Z_FEATURE_MULTICAST_DECLARATIONS 0 CACHE STRING "Toggle multicast resource declarations")
+set(Z_FEATURE_MULTICAST_LOOPBACK 1 CACHE STRING "Deliver own multicast datagrams to sockets on this host (0 sets IP_MULTICAST_LOOP off)")
 set(Z_FEATURE_PERIODIC_TASKS 0 CACHE STRING "Toggle periodic task support")
 
 # Add a warning message if someone tries to enable Z_FEATURE_LINK_SERIAL_USB directly

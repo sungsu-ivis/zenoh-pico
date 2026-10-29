@@ -19,6 +19,10 @@
 
 #include "perf_measure.h"
 
+/* 빌드 설정값을 문자열로 남긴다 (실행 첫 줄 출력, 실행 스크립트가 실행 파일에서 확인) */
+#define PERF_STR_(x) #x
+#define PERF_STR(x) PERF_STR_(x)
+
 #define PERF_MY_NAME "b"
 #define PERF_PEER_NAME "a"
 
@@ -79,8 +83,9 @@ int main(void) {
     printf("zenoh-pico %s | %s | unicast batch %u B | MULTI_THREAD=%d\n", ZENOH_PICO, PERF_LOCATOR,
            (unsigned)Z_BATCH_UNICAST_SIZE, Z_FEATURE_MULTI_THREAD);
 #else
-    printf("zenoh-pico %s | %s | multicast batch %u B | MULTI_THREAD=%d\n", ZENOH_PICO, PERF_LOCATOR,
-           (unsigned)Z_BATCH_MULTICAST_SIZE, Z_FEATURE_MULTI_THREAD);
+    printf("zenoh-pico %s | %s | multicast batch %u B | MULTI_THREAD=%d | MULTICAST_DECLARATIONS=" PERF_STR(
+               Z_FEATURE_MULTICAST_DECLARATIONS) " MULTICAST_LOOPBACK=" PERF_STR(Z_FEATURE_MULTICAST_LOOPBACK) "\n",
+           ZENOH_PICO, PERF_LOCATOR, (unsigned)Z_BATCH_MULTICAST_SIZE, Z_FEATURE_MULTI_THREAD);
 #endif
 
     const int result = perf_run(&node, &session, PERF_MY_NAME, PERF_PEER_NAME, &options, &perf_is_stop_requested);
