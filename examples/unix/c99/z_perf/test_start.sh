@@ -27,7 +27,7 @@
 # 결과 보고 (중앙값)
 #   실행마다 결과가 흔들리는 환경에서는 한 번의 값보다 여러 번의 중앙값이 대표값으로 낫다.
 #   RUNS는 홀수로 둔다. 그래야 중앙값이 실제 회차 하나의 결과가 된다. 두 PC의 RUNS는 같아야 한다.
-#   30초 확인을 통과하지 못한 회차는 "확인 실패"로 표시하고, 그 회차의 탐색 결과를 그대로 쓴다.
+#   확인 단계를 통과하지 못한 회차는 "확인 실패"로 표시하고, 그 회차의 탐색 결과를 그대로 쓴다.
 #
 # 측정 조건 기록
 #   이 PC의 커널, CPU, 클럭 정책, NIC(이름·속도·MTU·IPv4·드라이버), endpoint를 로그와 요약 맨 위에 남긴다.
@@ -35,7 +35,7 @@
 #
 # 사용법: ./test_start.sh tester|peer [로그 폴더]
 #   로그 폴더를 주지 않으면 지금 폴더에 회차별 tester_log_N.txt(또는 peer_log_N.txt)와 result_summary.txt를 쓴다.
-#   한 회차는 보통 6~10분 걸린다 (RUNS=3이면 약 30분).
+#   한 회차는 보통 1분 남짓 걸린다 (RUNS=3이면 약 3분 30초).
 #   Ctrl+C를 누르면 지금 회차를 멈추고(요약을 남긴다), 그때까지 끝난 회차로 결과를 낸다.
 #
 # 빌드하면 이 파일이 build/examples/z_perf/test_start.sh로 복사되고, 같은 폴더의 bin/을 실행한다.
@@ -53,7 +53,7 @@ LOG_DIR="${2:-$PWD}"
 SUMMARY="${LOG_DIR}/result_summary.txt"
 
 RUNS=3       # 측정 횟수 (홀수, 두 PC가 같아야 한다). 결과는 중앙값으로 보고한다
-RUN_GAP_S=15 # tester: 회차 사이에 쉬는 시간. 받는 쪽이 이전 회차를 끝내고(count가 끊긴 뒤 약 7초) 다시 뜨는 시간보다 길어야 한다
+RUN_GAP_S=9  # tester: 회차 사이에 쉬는 시간. 받는 쪽이 이전 회차를 끝내고(count가 끊긴 뒤 약 7초) 다시 뜨는 시간보다 길어야 한다
 
 PIN_CPUS=1 # 1: CPU 고정, 0: 고정하지 않음
 PIN_CPU=3  # 프로그램을 묶을 CPU 번호 (두 PC가 같은 번호를 쓴다)
@@ -281,7 +281,7 @@ run_once() {
     ${launch[@]+"${launch[@]}"} "$EXE" >>"$log" 2>&1 &
     child_pid=$!
     if [ "$ROLE" = "tester" ]; then
-        echo "측정 중입니다 (6~10분). 진행 상황: tail -f $log"
+        echo "측정 중입니다 (약 1분). 진행 상황: tail -f $log"
     else
         echo "보내는 쪽(tester)을 기다립니다. tester가 끝나면 이 회차도 끝납니다. 진행 상황: tail -f $log"
     fi
@@ -380,7 +380,7 @@ done
                 r=${run_info##* }
                 [ "$(result_of "${LOG_DIR}/${LOG_PREFIX}_${r}.txt" | cut -d'|' -f2)" = "확인 통과" ] && confirmed=$((confirmed + 1))
             done
-            echo "  중앙값: ${median_value} msg/s (${median_run}회 결과, ${#done_runs[@]}회 중 30초 확인 통과 ${confirmed}회)"
+            echo "  중앙값: ${median_value} msg/s (${median_run}회 결과, ${#done_runs[@]}회 중 확인 통과 ${confirmed}회)"
             echo
             echo "중앙값 회차(${median_run}회)의 결과:"
             sed -n '/===== 최대 처리량/,$p' "${LOG_DIR}/${LOG_PREFIX}_${median_run}.txt"
