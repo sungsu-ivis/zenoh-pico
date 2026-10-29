@@ -6,7 +6,7 @@
  *             TCP는 B(이쪽)가 PERF_LOCATOR 주소로 A의 접속을 기다린다.
  *             #iface=는 이 프로그램을 돌릴 PC(받는 쪽)의 NIC 이름으로 바꾸고 빌드한다.
  * 받는 것   : perf/msg/a/b/num0, perf/report/a/b/count
- * 보내는 것 : perf/report/b/a/status (1초마다 수신 결과를 A에게)
+ * 보내는 것 : perf/report/b/a/status (0.25초마다 수신 결과를 A에게)
  *
  * 실행: 받는 쪽 PC에서 build/examples/z_perf/test_start.sh peer
  *       (TCP는 build/examples/z_perf_tcp/test_start.sh peer)

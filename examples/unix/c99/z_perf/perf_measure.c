@@ -10,7 +10,8 @@
 #include <string.h>
 #include <time.h>
 
-#define PERF_COUNT_PERIOD_MS 1000u             /* 스케줄러가 count를 보내는 주기 */
+#define PERF_FEEDBACK_PERIOD_MS 250u /* count·status를 주고받고 탐색을 판정하는 주기 */
+#define PERF_TICKS_PER_SECOND (1000u / PERF_FEEDBACK_PERIOD_MS) /* 1초의 피드백 tick 수 */
 #define PERF_PEER_IDLE_STOP_US (5u * 1000000u) /* 받는 쪽: count가 이만큼 끊기면 상대가 끝난 것 */
 #define PERF_USER_BYTES (PERF_PAYLOAD_BYTES - PERF_HEADER_BYTES)
 
@@ -192,8 +193,8 @@ static void* perf_scheduler_main(void* arg) {
         /* 이번 tick에 batch에 남은 메시지를 내보낸다. 메시지가 batch에서 기다리는 시간은 1 ms를 넘지 않는다. */
         if (rate != 0u) perf_flush_batch(node);
 
-        /* 1초마다: 방금까지 보낸 데이터의 count를 보낸다 (탐색 중 쉬는 동안에도 보낸다) */
-        if ((tick_ms > 0u) && (tick_ms % PERF_COUNT_PERIOD_MS == 0u)) perf_send_count(node);
+        /* 0.25초마다: 방금까지 보낸 데이터의 count를 보낸다 (탐색 중 쉬는 동안에도 보낸다) */
+        if ((tick_ms > 0u) && (tick_ms % PERF_FEEDBACK_PERIOD_MS == 0u)) perf_send_count(node);
 
         /* 다음 깨어날 시각 = 이전 목표 + 1 ms ("지금 + 1 ms"로 하면 처리 시간만큼 밀린다) */
         perf_timespec_add_ms(&next, 1);
@@ -299,7 +300,7 @@ static void perf_on_status(z_loaned_sample_t* sample, void* context) {
 }
 
 /* ===================================================================
- * TX 피드백 스레드 (1초): 구간 마감 → status 송신(받는 쪽) / 탐색 진행(보내는 쪽) → 한 줄 출력
+ * TX 피드백 스레드 (0.25초): status 송신(받는 쪽) / 탐색 진행(보내는 쪽). 1초마다 구간 마감과 한 줄 출력
  * =================================================================== */
 
 /* 수신 1초 구간을 마감해 report에 옮기고 구간 값을 0으로 한다 (state_lock 안에서) */
@@ -372,19 +373,22 @@ static void perf_first_tick_at(struct timespec* t, long offset_ms) {
 
 static void perf_tx_feedback_tick(perf_node_t* node) {
     const uint64_t now = perf_now_us();
-    const uint64_t interval_us = now - node->last_tick_us;
-    node->last_tick_us = now;
+    /* 1초 통계(수신 구간 마감, 초당 송신량)와 출력은 1초 경계의 tick에서만 한다 */
+    const bool is_second_tick = (node->feedback_ticks++ % PERF_TICKS_PER_SECOND) == 0u;
 
     /* (1) 송신 카운터 읽기 (count는 스케줄러가 직접 보낸다. 여기서는 atomic으로 읽기만 한다) */
     perf_tx_stream_t* tx = &node->tx;
     const uint32_t published = perf_counter_get(&tx->published);
     const uint32_t sent_per_s = published - tx->last_second_published;
-    tx->last_second_published = published;
+    if (is_second_tick) tx->last_second_published = published;
     const uint32_t failed_total = perf_counter_get(&tx->failed);
 
-    /* (2) 수신 구간을 마감하고, 내 수신 결과와 상대 보고를 꺼낸다 */
+    /* (2) 1초 경계면 수신 구간을 마감한다. 내 수신 결과와 상대 보고를 꺼낸다 */
     pthread_mutex_lock(&node->state_lock);
-    perf_rx_close_interval(&node->rx, interval_us);
+    if (is_second_tick) {
+        perf_rx_close_interval(&node->rx, now - node->last_tick_us);
+        node->last_tick_us = now;
+    }
     const perf_stream_report_t mine = node->rx.report;
     const perf_stream_report_t peer = node->peer_view;
     const bool has_peer_view = node->has_peer_view;
@@ -405,7 +409,8 @@ static void perf_tx_feedback_tick(perf_node_t* node) {
         if (perf_search_is_done(&node->search)) perf_flag_set(&node->is_search_done, true);
     }
 
-    /* (5) 한 줄 출력: 받는 쪽은 수신 결과, 보내는 쪽은 송신량과 상대 보고 */
+    /* (5) 1초마다 한 줄 출력: 받는 쪽은 수신 결과, 보내는 쪽은 송신량과 상대 보고 */
+    if (!is_second_tick) return;
     const unsigned elapsed_s = ++node->print_seconds;
     if (!node->options.is_publisher) {
         printf("[%s %3us] 수신 %s→%s %6u msg/s %9.1f kbps  미수신 %6.3f%% (순간 %6.3f%%)  지터 RFC %4uus |D|최대 %5uus\n",
@@ -427,7 +432,7 @@ static void perf_tx_feedback_tick(perf_node_t* node) {
 }
 
 /* ===================================================================
- * RX 피드백 스레드 (1초): count로 미수신율 계산, status를 peer view에 저장
+ * RX 피드백 스레드 (0.25초): count로 미수신율 계산, status를 peer view에 저장
  * =================================================================== */
 
 /* 상대 count로 미수신 수를 계산한다 (state_lock 안에서).
@@ -474,7 +479,7 @@ static void perf_rx_feedback_tick(perf_node_t* node) {
     pthread_mutex_unlock(&node->state_lock);
 }
 
-/* 피드백 스레드 공통 틀: 1초마다 tick을 부른다 */
+/* 피드백 스레드 공통 틀: 0.25초(FEEDBACK_PERIOD_MS)마다 tick을 부른다 */
 static void* perf_tx_feedback_main(void* arg) {
     perf_node_t* node = (perf_node_t*)arg;
     struct timespec next;
@@ -482,7 +487,7 @@ static void* perf_tx_feedback_main(void* arg) {
     while (!perf_flag_get(&node->should_stop_feedback)) {
         perf_sleep_until(&next);
         if (!perf_flag_get(&node->should_stop_feedback)) perf_tx_feedback_tick(node);
-        perf_timespec_add_ms(&next, 1000);
+        perf_timespec_add_ms(&next, (long)PERF_FEEDBACK_PERIOD_MS);
     }
     return NULL;
 }
@@ -490,11 +495,12 @@ static void* perf_tx_feedback_main(void* arg) {
 static void* perf_rx_feedback_main(void* arg) {
     perf_node_t* node = (perf_node_t*)arg;
     struct timespec next;
-    perf_first_tick_at(&next, 500L); /* TX 피드백과 반 박자 엇갈려 돈다 */
+    /* TX 피드백과 반 박자 엇갈려 돈다 */
+    perf_first_tick_at(&next, (long)PERF_FEEDBACK_PERIOD_MS / 2L);
     while (!perf_flag_get(&node->should_stop_feedback)) {
         perf_sleep_until(&next);
         perf_rx_feedback_tick(node);
-        perf_timespec_add_ms(&next, 1000);
+        perf_timespec_add_ms(&next, (long)PERF_FEEDBACK_PERIOD_MS);
     }
     return NULL;
 }

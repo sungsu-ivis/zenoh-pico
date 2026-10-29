@@ -3,8 +3,8 @@
 손실 0%로 보낼 수 있는 128 B 메시지의 최대 송신량(msg/s)을 찾는다.
 brightonz.foundation의 z_perf 예제와 같은 측정이다. 탐색·판정 코드(`perf_max_throughput.*`)는 그 예제와 같고, 통신 부분만 zenoh-pico API로 바꿨다.
 
-- 보내는 쪽 A: `z_perf_tester`. 송신량을 2배씩 올리고 이분 탐색으로 좁힌 뒤, 30초 확인으로 결과를 정한다.
-- 받는 쪽 B: `z_perf_peer`. 받은 결과를 1초마다 A에게 돌려준다.
+- 보내는 쪽 A: `z_perf_tester`. 500,000 msg/s부터 송신량을 2배씩 올리거나(처음부터 실패하면 절반씩 내리고) 이분 탐색으로 좁힌 뒤, 15초 확인으로 결과를 정한다.
+- 받는 쪽 B: `z_perf_peer`. 받은 결과를 0.25초마다 A에게 돌려준다.
 - 전송: UDP multicast `239.192.0.78:19153` (peer 모드). PC 두 대에서 잰다. loopback은 NIC 드라이버를 거치지 않으므로 쓰지 않는다.
 
 자세한 구조는 `perf_measure.h`, 탐색 순서는 `perf_max_throughput.h` 맨 위 설명에 있다.
@@ -59,7 +59,7 @@ cd ~/workspace/zenoh-pico && ./build/examples/z_perf/test_start.sh peer ~/zperf_
 cd ~/workspace/zenoh-pico && ./build/examples/z_perf/test_start.sh tester ~/zperf_logs/zp
 ```
 
-- 3회 측정해 중앙값을 보고한다. 한 회차는 6~10분, 전체는 약 30분 걸린다. 측정 중에는 두 PC를 쓰지 않는다.
+- 3회 측정해 중앙값을 보고한다. 한 회차는 1분 남짓, 전체는 약 3분 30초 걸린다. 측정 중에는 두 PC를 쓰지 않는다.
 - 결과는 보내는 쪽 PC의 `result_summary.txt`에 있다. 회차별 로그는 `tester_log_N.txt`, `peer_log_N.txt`.
 - 스크립트는 바이너리에 든 `#iface=`로 NIC를 확인한다. NIC가 없거나 꺼져 있거나 `lo`이면 시작하지 않는다.
 - 두 PC 모두 같은 CPU(`PIN_CPU=3`)에 프로그램을 묶는다.

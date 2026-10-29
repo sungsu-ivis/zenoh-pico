@@ -10,21 +10,21 @@
 #include "perf_measure.h"
 
 #define PERF_SEARCH_WARMUP_RATE 1000u                  /* 워밍업 송신량 (msg/s) */
-#define PERF_SEARCH_START_RATE 1000u                   /* 첫 탐색 단계 송신량 (msg/s) */
+#define PERF_SEARCH_START_RATE 500000u                 /* 첫 탐색 단계 송신량 (msg/s) */
 #define PERF_SEARCH_MAX_RATE 1000000u                  /* 이 이상은 올리지 않는다 (msg/s) */
 #define PERF_SEARCH_WARMUP_US (3u * 1000000u)          /* 워밍업 단계에 보내는 시간 */
-#define PERF_SEARCH_SEND_US (15u * 1000000u)           /* 탐색 단계마다 보내는 시간 */
-#define PERF_SEARCH_CONFIRM_US (30u * 1000000u)        /* 확인 단계에 보내는 시간 */
+#define PERF_SEARCH_SEND_US (5u * 1000000u)            /* 탐색 단계마다 보내는 시간 */
+#define PERF_SEARCH_CONFIRM_US (15u * 1000000u)        /* 확인 단계에 보내는 시간 */
 #define PERF_SEARCH_CONFIRM_MAX_TRIES 5u               /* 확인 단계를 이 횟수까지 해 본다 */
 #define PERF_SEARCH_SETTLE_TIMEOUT_US (15u * 1000000u) /* 이 시간 안에 상대 보고가 따라오지 않으면 중단 */
-#define PERF_SEARCH_PRECISION_PCT 2u                   /* 통과값과 실패값 차이가 통과값의 이 % 이하면 탐색 끝 */
+#define PERF_SEARCH_PRECISION_PCT 4u                   /* 통과값과 실패값 차이가 통과값의 이 % 이하면 탐색 끝 */
 #define PERF_SEARCH_MIN_GAP_RATE 100u                  /* 위 정밀도의 최솟값 (msg/s) */
 #define PERF_SEARCH_ACHIEVED_PCT 95u                   /* 실제 송신량이 목표의 이 % 이상이어야 통과 */
 
 /* 송신량(msg/s) → Mbps. user_bytes는 메시지 한 개에서 셀 바이트 수 */
 static double perf_rate_to_mbps(uint32_t rate, uint32_t user_bytes) { return (double)rate * user_bytes * 8.0 / 1e6; }
 
-/* 탐색 정밀도: rate의 2% (최소 100 msg/s).
+/* 탐색 정밀도: rate의 4% (최소 100 msg/s).
  * 이분 탐색을 끝낼 기준과, 확인 단계가 실패했을 때 목표를 내리는 폭에 같이 쓴다. */
 static uint32_t perf_precision_of(uint32_t rate) {
     const uint32_t precision = rate * PERF_SEARCH_PRECISION_PCT / 100u;
@@ -83,7 +83,8 @@ static uint32_t perf_next_target_rate(const perf_search_t* s) {
         const uint32_t doubled = s->pass_rate * 2u;
         return (doubled > PERF_SEARCH_MAX_RATE) ? PERF_SEARCH_MAX_RATE : doubled;
     }
-    /* 실패가 나온 뒤에는 통과값과 실패값의 가운데로 좁힌다 */
+    /* 실패가 나온 뒤에는 통과값과 실패값의 가운데로 좁힌다.
+     * 첫 단계부터 실패해 통과값이 아직 0이면, 실패값의 절반(250,000, 125,000, …)으로 내려가며 다시 찾는다 */
     if (s->fail_rate <= s->pass_rate) return 0u; /* 측정이 흔들려 순서가 뒤집혔으면 여기서 끝 */
     const uint32_t gap = s->fail_rate - s->pass_rate;
     if (gap <= perf_precision_of(s->pass_rate)) return 0u;
@@ -197,7 +198,7 @@ uint32_t perf_search_step(perf_search_t* s, uint64_t now_us, uint32_t published,
         }
 
         case PERF_SEARCH_SETTLING: {
-            /* 송신 멈춤 지시 후 1초가 지나 스케줄러가 확실히 멈췄을 때의 값을 이번 단계의 끝으로 잡는다 */
+            /* 송신 멈춤 지시 후 다음 tick(0.25초 뒤), 스케줄러가 확실히 멈췄을 때의 값을 이번 단계의 끝으로 잡는다 */
             if (!s->has_step_end) {
                 s->has_step_end = true;
                 s->step_end_published = published;
