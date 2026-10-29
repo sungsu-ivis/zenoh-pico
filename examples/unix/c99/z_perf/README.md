@@ -59,7 +59,7 @@ cd ~/workspace/zenoh-pico && ./build/examples/z_perf/test_start.sh peer ~/zperf_
 cd ~/workspace/zenoh-pico && ./build/examples/z_perf/test_start.sh tester ~/zperf_logs/zp
 ```
 
-- 3회 측정해 중앙값을 보고한다. 한 회차는 1분 남짓, 전체는 약 3분 30초 걸린다. 측정 중에는 두 PC를 쓰지 않는다.
+- 3회 측정해 중앙값을 보고한다. 한 회차는 1분쯤, 전체는 약 3분 걸린다. 측정 중에는 두 PC를 쓰지 않는다.
 - 결과는 보내는 쪽 PC의 `result_summary.txt`에 있다. 회차별 로그는 `tester_log_N.txt`, `peer_log_N.txt`.
 - 스크립트는 바이너리에 든 `#iface=`로 NIC를 확인한다. NIC가 없거나 꺼져 있거나 `lo`이면 시작하지 않는다.
 - 두 PC 모두 같은 CPU(`PIN_CPU=3`)에 프로그램을 묶는다.
