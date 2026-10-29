@@ -13,7 +13,7 @@
 #define PERF_SEARCH_START_RATE 500000u                 /* 첫 탐색 단계 송신량 (msg/s) */
 #define PERF_SEARCH_MAX_RATE 1000000u                  /* 이 이상은 올리지 않는다 (msg/s) */
 #define PERF_SEARCH_WARMUP_US (3u * 1000000u)          /* 워밍업 단계에 보내는 시간 */
-#define PERF_SEARCH_SEND_US (5u * 1000000u)            /* 탐색 단계마다 보내는 시간 */
+#define PERF_SEARCH_SEND_US (4u * 1000000u)            /* 탐색 단계마다 보내는 시간 */
 #define PERF_SEARCH_CONFIRM_US (15u * 1000000u)        /* 확인 단계에 보내는 시간 */
 #define PERF_SEARCH_CONFIRM_MAX_TRIES 5u               /* 확인 단계를 이 횟수까지 해 본다 */
 #define PERF_SEARCH_SETTLE_TIMEOUT_US (15u * 1000000u) /* 이 시간 안에 상대 보고가 따라오지 않으면 중단 */

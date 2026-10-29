@@ -35,7 +35,7 @@
 #
 # 사용법: ./test_start.sh tester|peer [로그 폴더]
 #   로그 폴더를 주지 않으면 지금 폴더에 회차별 tester_log_N.txt(또는 peer_log_N.txt)와 result_summary.txt를 쓴다.
-#   한 회차는 보통 1분 남짓 걸린다 (RUNS=3이면 약 3분 30초).
+#   한 회차는 보통 1분쯤 걸린다 (RUNS=3이면 약 3분).
 #   Ctrl+C를 누르면 지금 회차를 멈추고(요약을 남긴다), 그때까지 끝난 회차로 결과를 낸다.
 #
 # 빌드하면 이 파일이 build/examples/z_perf/test_start.sh로 복사되고, 같은 폴더의 bin/을 실행한다.
