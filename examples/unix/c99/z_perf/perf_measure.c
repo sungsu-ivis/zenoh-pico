@@ -26,6 +26,7 @@ static uint64_t perf_now_us(void) {
     return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
 }
 
+#if Z_FEATURE_MULTI_THREAD == 1 /* 잠드는 함수는 스레드가 있는 MT1에서만 쓴다 */
 static void perf_timespec_add_ms(struct timespec* t, long ms) {
     t->tv_nsec += ms * 1000000L;
     while (t->tv_nsec >= 1000000000L) {
@@ -46,6 +47,7 @@ static void perf_sleep_ms(long ms) {
     perf_timespec_add_ms(&t, ms);
     perf_sleep_until(&t);
 }
+#endif
 
 /* ===================================================================
  * 바이트 읽기/쓰기 (little-endian)
@@ -174,27 +176,34 @@ static void perf_send_count(perf_node_t* node) {
     (void)perf_put(&node->count_publisher, message, sizeof(message));
 }
 
+/* 스케줄러 tick 한 번 (1 ms). tick_ms는 0부터 1씩 는다.
+ * rate_credit은 1 ms마다 목표 송신량만큼 쌓고, 1000이 모일 때마다 1개 보낸다. */
+static void perf_scheduler_tick(perf_node_t* node, uint64_t tick_ms, uint64_t* rate_credit) {
+    /* 목표 송신량(msg/s)을 1 ms마다 rate/1000개씩 나눠 보낸다 (예: 30000 msg/s → 1 ms마다 30개).
+     * 보내는 데 1 ms보다 오래 걸리면 다음 tick이 늦어져, 송신 측이 낼 수 있는 최대 속도로 보내게 된다. */
+    const uint32_t rate = perf_target_rate_get(node);
+    *rate_credit = (rate == 0u) ? 0u : *rate_credit + rate;
+    while (*rate_credit >= 1000u) {
+        perf_send_message(node);
+        *rate_credit -= 1000u;
+    }
+    /* 이번 tick에 batch에 남은 메시지를 내보낸다. 메시지가 batch에서 기다리는 시간은 1 ms를 넘지 않는다. */
+    if (rate != 0u) perf_flush_batch(node);
+
+    /* 0.25초마다: 방금까지 보낸 데이터의 count를 보낸다 (탐색 중 쉬는 동안에도 보낸다) */
+    if ((tick_ms > 0u) && (tick_ms % PERF_FEEDBACK_PERIOD_MS == 0u)) perf_send_count(node);
+}
+
+#if Z_FEATURE_MULTI_THREAD == 1
 static void* perf_scheduler_main(void* arg) {
     perf_node_t* node = (perf_node_t*)arg;
     struct timespec next;
     clock_gettime(CLOCK_MONOTONIC, &next);
     uint64_t tick_ms = 0u;
-    uint64_t rate_credit = 0u; /* 1 ms마다 목표 송신량만큼 쌓고, 1000이 모일 때마다 1개 보낸다 */
+    uint64_t rate_credit = 0u;
 
     while (!perf_flag_get(&node->should_stop_publish)) {
-        /* 목표 송신량(msg/s)을 1 ms마다 rate/1000개씩 나눠 보낸다 (예: 30000 msg/s → 1 ms마다 30개).
-         * 보내는 데 1 ms보다 오래 걸리면 다음 tick이 늦어져, 송신 측이 낼 수 있는 최대 속도로 보내게 된다. */
-        const uint32_t rate = perf_target_rate_get(node);
-        rate_credit = (rate == 0u) ? 0u : rate_credit + rate;
-        while (rate_credit >= 1000u) {
-            perf_send_message(node);
-            rate_credit -= 1000u;
-        }
-        /* 이번 tick에 batch에 남은 메시지를 내보낸다. 메시지가 batch에서 기다리는 시간은 1 ms를 넘지 않는다. */
-        if (rate != 0u) perf_flush_batch(node);
-
-        /* 0.25초마다: 방금까지 보낸 데이터의 count를 보낸다 (탐색 중 쉬는 동안에도 보낸다) */
-        if ((tick_ms > 0u) && (tick_ms % PERF_FEEDBACK_PERIOD_MS == 0u)) perf_send_count(node);
+        perf_scheduler_tick(node, tick_ms, &rate_credit);
 
         /* 다음 깨어날 시각 = 이전 목표 + 1 ms ("지금 + 1 ms"로 하면 처리 시간만큼 밀린다) */
         perf_timespec_add_ms(&next, 1);
@@ -206,9 +215,11 @@ static void* perf_scheduler_main(void* arg) {
     perf_send_count(node);
     return NULL;
 }
+#endif
 
 /* ===================================================================
  * 수신: zenoh-pico 읽기 태스크에서 불리는 콜백 (subscriber마다 하나, context는 perf_node_t*)
+ * (MT0에서는 메인 스레드의 zp_read 안에서 불린다)
  * =================================================================== */
 
 /* D 하나를 지터 통계에 넣는다 */
@@ -363,14 +374,6 @@ static void perf_get_report(const uint8_t* p, perf_stream_report_t* r) {
     (void)perf_get_u32(p, &r->counted_seq);
 }
 
-/* 첫 tick 시각 = 다음 1초 경계(CLOCK_MONOTONIC) + offset */
-static void perf_first_tick_at(struct timespec* t, long offset_ms) {
-    clock_gettime(CLOCK_MONOTONIC, t);
-    t->tv_sec += 1;
-    t->tv_nsec = 0;
-    perf_timespec_add_ms(t, offset_ms);
-}
-
 static void perf_tx_feedback_tick(perf_node_t* node) {
     const uint64_t now = perf_now_us();
     /* 1초 통계(수신 구간 마감, 초당 송신량)와 출력은 1초 경계의 tick에서만 한다 */
@@ -479,6 +482,15 @@ static void perf_rx_feedback_tick(perf_node_t* node) {
     pthread_mutex_unlock(&node->state_lock);
 }
 
+#if Z_FEATURE_MULTI_THREAD == 1
+/* 첫 tick 시각 = 다음 1초 경계(CLOCK_MONOTONIC) + offset */
+static void perf_first_tick_at(struct timespec* t, long offset_ms) {
+    clock_gettime(CLOCK_MONOTONIC, t);
+    t->tv_sec += 1;
+    t->tv_nsec = 0;
+    perf_timespec_add_ms(t, offset_ms);
+}
+
 /* 피드백 스레드 공통 틀: 0.25초(FEEDBACK_PERIOD_MS)마다 tick을 부른다 */
 static void* perf_tx_feedback_main(void* arg) {
     perf_node_t* node = (perf_node_t*)arg;
@@ -504,6 +516,7 @@ static void* perf_rx_feedback_main(void* arg) {
     }
     return NULL;
 }
+#endif
 
 /* ===================================================================
  * 시작 / 종료 / 요약
@@ -616,6 +629,102 @@ static void perf_print_summary(perf_node_t* node) {
     pthread_mutex_unlock(&node->state_lock);
 }
 
+/* 끝낼 때인가
+ *   - 보내는 쪽: 탐색이 끝나면
+ *   - 받는 쪽  : 상대 count가 5초 동안 끊기면 (상대 프로그램이 끝남) */
+static bool perf_is_finished(perf_node_t* node) {
+    if (node->options.is_publisher) return perf_flag_get(&node->is_search_done);
+    pthread_mutex_lock(&node->state_lock);
+    const uint64_t last_count_us = node->last_count_us;
+    pthread_mutex_unlock(&node->state_lock);
+    return (last_count_us != 0u) && (perf_now_us() - last_count_us >= PERF_PEER_IDLE_STOP_US);
+}
+
+#if Z_FEATURE_MULTI_THREAD == 1
+/* MT1: 스케줄러·TX 피드백·RX 피드백 스레드를 띄우고, 끝날 때까지 기다렸다가 정리한다 */
+static void perf_run_threads(perf_node_t* node, volatile sig_atomic_t* is_stop_requested) {
+    pthread_create(&node->tx_feedback_thread, NULL, perf_tx_feedback_main, node);
+    pthread_create(&node->rx_feedback_thread, NULL, perf_rx_feedback_main, node);
+    if (node->options.is_publisher) pthread_create(&node->scheduler_thread, NULL, perf_scheduler_main, node);
+
+    while ((*is_stop_requested == 0) && !perf_is_finished(node)) perf_sleep_ms(100);
+
+    /* 송신을 멈추고, 피드백은 drain 시간 동안 계속 돌려서 최종 count/status를 주고받는다 */
+    perf_flag_set(&node->should_stop_publish, true);
+    if (node->options.is_publisher) pthread_join(node->scheduler_thread, NULL);
+    perf_sleep_ms((long)node->options.drain_s * 1000L);
+    perf_flag_set(&node->should_stop_feedback, true);
+    pthread_join(node->tx_feedback_thread, NULL);
+    pthread_join(node->rx_feedback_thread, NULL);
+}
+#else
+/* MT0 (싱글스레드): 라이브러리에 읽기·lease 태스크가 없으므로 이 프로그램도 스레드를 만들지 않는다.
+ * 메인 스레드가 아래 일을 차례로 되풀이한다. tick 시각표는 MT1의 세 스레드와 같다.
+ *   - zp_read: 받은 메시지를 처리한다(구독 콜백 호출). 받을 것이 없으면 소켓 timeout(Z_CONFIG_SOCKET_TIMEOUT)만큼
+ *     기다렸다 돌아온다. MT0 빌드는 이 값을 1 ms로 둔다 (커널은 tick 단위로 올리므로 실제로는 1~10 ms)
+ *   - lease 태스크가 하던 일: keep-alive는 lease/Z_TRANSPORT_LEASE_EXPIRE_FACTOR마다, JOIN은 Z_JOIN_INTERVAL마다 보낸다
+ *   - 보내는 쪽: 1 ms마다 스케줄러 tick
+ *   - 0.25초마다 TX 피드백 tick (1초 경계부터), RX 피드백 tick (반 박자 뒤부터) */
+static void perf_run_single_thread(perf_node_t* node, volatile sig_atomic_t* is_stop_requested) {
+    const z_loaned_session_t* session = z_session_loan(node->session);
+    const uint64_t feedback_period_us = (uint64_t)PERF_FEEDBACK_PERIOD_MS * 1000u;
+    const uint64_t keep_alive_period_us = (uint64_t)Z_TRANSPORT_LEASE / Z_TRANSPORT_LEASE_EXPIRE_FACTOR * 1000u;
+    const uint64_t join_period_us = (uint64_t)Z_JOIN_INTERVAL * 1000u;
+    uint64_t now = perf_now_us();
+    uint64_t next_schedule_us = now;
+    uint64_t tick_ms = 0u;
+    uint64_t rate_credit = 0u;
+    uint64_t next_tx_feedback_us = (now / 1000000u + 1u) * 1000000u; /* 다음 1초 경계 */
+    uint64_t next_rx_feedback_us = next_tx_feedback_us + feedback_period_us / 2u;
+    uint64_t next_keep_alive_us = now + keep_alive_period_us;
+    uint64_t next_join_us = now;                   /* 시작하자마자 한 번 보낸다 */
+    uint64_t next_finish_check_us = now + 100000u; /* MT1처럼 0.1초마다 끝낼 때인지 본다 */
+    uint64_t drain_end_us = 0u;                    /* 0이면 아직 송신 중 */
+    bool is_publishing = node->options.is_publisher;
+
+    for (;;) {
+        (void)zp_read(session, NULL); /* 받을 것이 없으면 timeout으로 돌아온다 (오류가 아니다) */
+        now = perf_now_us();
+        if (now >= next_keep_alive_us) {
+            (void)zp_send_keep_alive(session, NULL);
+            next_keep_alive_us += keep_alive_period_us;
+        }
+        if (now >= next_join_us) {
+            (void)zp_send_join(session, NULL);
+            next_join_us += join_period_us;
+        }
+        /* zp_read가 받을 것 없이 기다리면 그동안의 tick이 밀린다 (소켓 timeout은 커널 tick 단위로 올라가 1 ms보다 길다).
+         * 밀린 tick은 여기서 이어서 돌아 평균 송신량을 목표에 맞춘다 */
+        while (is_publishing && (now >= next_schedule_us)) {
+            perf_scheduler_tick(node, tick_ms++, &rate_credit);
+            next_schedule_us += 1000u; /* 이전 목표 + 1 ms */
+        }
+        if (now >= next_tx_feedback_us) {
+            perf_tx_feedback_tick(node);
+            next_tx_feedback_us += feedback_period_us;
+        }
+        if (now >= next_rx_feedback_us) {
+            perf_rx_feedback_tick(node);
+            next_rx_feedback_us += feedback_period_us;
+        }
+
+        if (drain_end_us != 0u) {
+            if (now >= drain_end_us) break;
+        } else if (now >= next_finish_check_us) {
+            next_finish_check_us += 100000u;
+            if ((*is_stop_requested != 0) || perf_is_finished(node)) {
+                /* 송신을 멈추고 마지막 count를 보낸 뒤, drain 시간 동안 받기와 피드백만 계속한다 */
+                perf_flag_set(&node->should_stop_publish, true);
+                if (is_publishing) perf_send_count(node);
+                is_publishing = false;
+                drain_end_us = now + (uint64_t)node->options.drain_s * 1000000u;
+            }
+        }
+    }
+    perf_flag_set(&node->should_stop_feedback, true);
+}
+#endif
+
 int perf_run(perf_node_t* node, const z_owned_session_t* session, const char* my_name, const char* peer_name,
              const perf_options_t* options, volatile sig_atomic_t* is_stop_requested) {
     if (!perf_node_open(node, session, my_name, peer_name, options)) return 1;
@@ -631,32 +740,11 @@ int perf_run(perf_node_t* node, const z_owned_session_t* session, const char* my
     } else {
         printf("제어기 %s 시작 (받는 쪽: 상대가 끝나면 함께 끝남)\n", my_name);
     }
-    pthread_create(&node->tx_feedback_thread, NULL, perf_tx_feedback_main, node);
-    pthread_create(&node->rx_feedback_thread, NULL, perf_rx_feedback_main, node);
-    if (options->is_publisher) pthread_create(&node->scheduler_thread, NULL, perf_scheduler_main, node);
-
-    /* 끝날 때까지 기다린다
-     *   - 보내는 쪽: 탐색이 끝나면
-     *   - 받는 쪽  : 상대 count가 5초 동안 끊기면 (상대 프로그램이 끝남) */
-    while (*is_stop_requested == 0) {
-        if (options->is_publisher) {
-            if (perf_flag_get(&node->is_search_done)) break;
-        } else {
-            pthread_mutex_lock(&node->state_lock);
-            const uint64_t last_count_us = node->last_count_us;
-            pthread_mutex_unlock(&node->state_lock);
-            if ((last_count_us != 0u) && (perf_now_us() - last_count_us >= PERF_PEER_IDLE_STOP_US)) break;
-        }
-        perf_sleep_ms(100);
-    }
-
-    /* 송신을 멈추고, 피드백은 drain 시간 동안 계속 돌려서 최종 count/status를 주고받는다 */
-    perf_flag_set(&node->should_stop_publish, true);
-    if (options->is_publisher) pthread_join(node->scheduler_thread, NULL);
-    perf_sleep_ms((long)options->drain_s * 1000L);
-    perf_flag_set(&node->should_stop_feedback, true);
-    pthread_join(node->tx_feedback_thread, NULL);
-    pthread_join(node->rx_feedback_thread, NULL);
+#if Z_FEATURE_MULTI_THREAD == 1
+    perf_run_threads(node, is_stop_requested);
+#else
+    perf_run_single_thread(node, is_stop_requested);
+#endif
     perf_flag_set(&node->is_ready, false);
 
     perf_print_summary(node);

@@ -47,6 +47,23 @@ cmake --build build --target z_perf_tester z_perf_peer z_perf_tcp_tester z_perf_
 - configure가 `include/zenoh-pico.h`, `include/zenoh-pico/config.h`, `library.json`, `zenohpico.pc`를 다시 쓴다.
   저장소에 들어 있는 값이 오래된 것이라 수정으로 보이는데, 빌드 산출물이므로 커밋하지 않는다.
 
+### 싱글스레드(MT0)로 빌드할 때
+
+MT1의 `build`와 따로 `build_mt0`에 빌드한다. multicast만 잴 수 있다
+(1.6.1은 MT0에서 unicast peer를 끄므로 TCP 직접 연결이 없다. `z_perf_tcp_*`는 안내만 출력하고 끝난다).
+
+```sh
+cmake -S . -B build_mt0 -DCMAKE_BUILD_TYPE=Release -DZ_FEATURE_MULTI_THREAD=0 -DZ_CONFIG_SOCKET_TIMEOUT=1 -DBATCH_MULTICAST_SIZE=1450 -DBATCH_UNICAST_SIZE=1450 -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF
+cmake --build build_mt0 --target z_perf_tester z_perf_peer
+```
+
+- MT0에는 읽기·lease 태스크가 없다. 메인 루프 하나가 `zp_read`(수신 콜백), keep-alive·JOIN 송신, 송신 tick, 피드백을 돌린다.
+- `Z_CONFIG_SOCKET_TIMEOUT=1`: 받을 것이 없을 때 `zp_read`가 기다리는 시간(기본 100 ms)을 줄여 송신 tick이 덜 밀리게 한다.
+  커널이 tick 단위로 올리므로 실제로는 1~10 ms이고, 그동안 밀린 송신 tick은 이어서 돌아 평균 송신량을 맞춘다.
+- configure는 소스 폴더의 `include/zenoh-pico/config.h`를 다시 쓰므로, `build`와 `build_mt0`를 번갈아 빌드할 때는
+  빌드 직전에 그 폴더의 configure를 다시 한다. 빌드된 실행 파일은 정적 링크라 이후 configure의 영향을 받지 않는다.
+- 실행은 4장과 같고 폴더만 `build_mt0`다. 로그 첫 줄의 `MULTI_THREAD=0`으로 확인한다.
+
 ## 4. 실행 (받는 쪽을 먼저)
 
 저장소 최상위에서 (`cd`가 실패하면 실행하지 않도록 `&&`로 잇는다):
