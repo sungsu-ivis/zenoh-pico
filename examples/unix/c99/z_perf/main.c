@@ -12,6 +12,8 @@
  *       (TCP는 build/examples/z_perf_tcp/test_start.sh tester)
  *       (받는 쪽 PC에서 test_start.sh peer를 먼저 띄운다)
  *       탐색이 끝나면 결과를 출력하고 스스로 끝난다.
+ *       직접 실행할 때: z_perf_tester [허용 미수신율 2|3|5 (%)]. 주지 않으면 2%.
+ *       test_start.sh는 LOSS_PCT 값을 이 인자로 넘긴다.
  */
 #include <signal.h>
 #include <stdio.h>
@@ -48,11 +50,14 @@ static void perf_on_signal(int signal_number) {
     perf_is_stop_requested = 1;
 }
 
-int main(void) {
+int main(int argc, char** argv) {
     static perf_node_t node; /* 콜백이 쓰는 측정 상태. 선언 전에 0으로 준비돼 있어야 한다 */
+    uint32_t allowed_unreceived_pct;
+    if (!perf_parse_unreceived_pct(argc, argv, &allowed_unreceived_pct)) return 1;
     const perf_options_t options = {
         .drain_s = PERF_DRAIN_S,
         .is_publisher = PERF_IS_PUBLISHER,
+        .allowed_unreceived_pct = allowed_unreceived_pct,
     };
 
     signal(SIGINT, perf_on_signal);

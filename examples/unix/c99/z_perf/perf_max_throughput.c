@@ -96,19 +96,34 @@ static bool perf_is_rate_achieved(const perf_search_t* s) {
     return (uint64_t)s->step_actual_rate * 100u >= (uint64_t)s->target_rate * PERF_SEARCH_ACHIEVED_PCT;
 }
 
+/* 이번 단계에 보낸 수 */
+static uint32_t perf_step_sent(const perf_search_t* s) { return s->step_end_published - s->step_start_published; }
+
+/* 미수신 수가 보낸 수의 허용 미수신율 이하인가 */
+static bool perf_is_loss_allowed(const perf_search_t* s, uint32_t lost, uint32_t sent) {
+    return (uint64_t)lost * 100u <= (uint64_t)sent * s->allowed_unreceived_pct;
+}
+
+/* 미수신율 (%) */
+static double perf_lost_pct(uint32_t lost, uint32_t sent) {
+    return (sent == 0u) ? 0.0 : (double)lost * 100.0 / (double)sent;
+}
+
 /* 판정 줄의 공통 뒷부분: 목표, 실제 송신량, 보낸 수, 미수신, 결과 */
 static void perf_print_step_result(const perf_search_t* s, uint32_t lost, bool is_pass) {
-    const uint32_t sent = s->step_end_published - s->step_start_published;
-    const char* verdict = is_pass ? "통과" : ((lost != 0u) ? "실패 (손실)" : "실패 (목표만큼 못 보냄)");
-    printf("목표 %7u msg/s | 실제 %7u msg/s (%7.2f Mbps) | 보냄 %8u | 미수신 %6u → %s\n\n", s->target_rate,
-           s->step_actual_rate, perf_rate_to_mbps(s->step_actual_rate, PERF_PAYLOAD_BYTES - PERF_HEADER_BYTES), sent, lost,
-           verdict);
+    const uint32_t sent = perf_step_sent(s);
+    const char* verdict =
+        is_pass ? "통과" : (!perf_is_loss_allowed(s, lost, sent) ? "실패 (미수신율 초과)" : "실패 (목표만큼 못 보냄)");
+    printf("목표 %7u msg/s | 실제 %7u msg/s (%7.2f Mbps) | 보냄 %8u | 미수신 %6u (%6.3f%%) → %s\n\n", s->target_rate,
+           s->step_actual_rate, perf_rate_to_mbps(s->step_actual_rate, PERF_PAYLOAD_BYTES - PERF_HEADER_BYTES), sent,
+           lost, perf_lost_pct(lost, sent), verdict);
 }
 
 /* 탐색 단계 하나를 판정하고 한 줄 출력한다 */
 static void perf_judge_step(perf_search_t* s, uint32_t lost, const char* my_name) {
+    const uint32_t sent = perf_step_sent(s);
     const bool is_achieved = perf_is_rate_achieved(s);
-    const bool is_pass = (lost == 0u) && is_achieved;
+    const bool is_pass = perf_is_loss_allowed(s, lost, sent) && is_achieved;
 
     s->step_no++;
     printf("[%s 탐색] 단계 %2u: ", my_name, s->step_no);
@@ -116,7 +131,11 @@ static void perf_judge_step(perf_search_t* s, uint32_t lost, const char* my_name
 
     if (is_pass) {
         if (s->target_rate > s->pass_rate) s->pass_rate = s->target_rate;
-        if (s->step_actual_rate > s->best_actual_rate) s->best_actual_rate = s->step_actual_rate;
+        if (s->step_actual_rate > s->best_actual_rate) {
+            s->best_actual_rate = s->step_actual_rate;
+            s->best_sent = sent;
+            s->best_lost = lost;
+        }
     } else {
         if ((s->fail_rate == 0u) || (s->target_rate < s->fail_rate)) s->fail_rate = s->target_rate;
         if (!is_achieved) s->is_sender_limited = true;
@@ -125,8 +144,9 @@ static void perf_judge_step(perf_search_t* s, uint32_t lost, const char* my_name
 
 /* 확인 단계를 판정하고 한 줄 출력한다. 통과하면 true */
 static bool perf_judge_confirm(perf_search_t* s, uint32_t lost, const char* my_name) {
+    const uint32_t sent = perf_step_sent(s);
     const bool is_achieved = perf_is_rate_achieved(s);
-    const bool is_pass = (lost == 0u) && is_achieved;
+    const bool is_pass = perf_is_loss_allowed(s, lost, sent) && is_achieved;
 
     printf("[%s 확인] %u회째 (%u초): ", my_name, s->confirm_tries, PERF_SEARCH_CONFIRM_US / 1000000u);
     perf_print_step_result(s, lost, is_pass);
@@ -135,6 +155,8 @@ static bool perf_judge_confirm(perf_search_t* s, uint32_t lost, const char* my_n
         s->is_confirmed = true;
         s->confirmed_target_rate = s->target_rate;
         s->confirmed_rate = s->step_actual_rate;
+        s->confirmed_sent = sent;
+        s->confirmed_lost = lost;
     } else if (!is_achieved) {
         s->is_sender_limited = true;
     }
@@ -179,8 +201,9 @@ static uint32_t perf_finish_confirm_step(perf_search_t* s, uint64_t now_us, uint
     return s->target_rate;
 }
 
-void perf_search_init(perf_search_t* s, uint64_t now_us) {
+void perf_search_init(perf_search_t* s, uint64_t now_us, uint32_t allowed_unreceived_pct) {
     memset(s, 0, sizeof(*s));
+    s->allowed_unreceived_pct = allowed_unreceived_pct;
     perf_start_sending(s, now_us, 0u, PERF_SEARCH_WARMUP_RATE, PERF_STEP_WARMUP);
 }
 
@@ -242,15 +265,18 @@ uint32_t perf_search_step(perf_search_t* s, uint64_t now_us, uint32_t published,
 bool perf_search_is_done(const perf_search_t* s) { return s->phase == PERF_SEARCH_DONE; }
 
 void perf_search_print_result(const perf_search_t* s, const char* my_name, const char* peer_name) {
-    printf("\n===== 최대 처리량 (손실 0%%, 메시지 %u B, %s→%s) =====\n", PERF_PAYLOAD_BYTES, my_name, peer_name);
+    printf("\n===== 최대 처리량 (허용 미수신율 %u%%, 메시지 %u B, %s→%s) =====\n", s->allowed_unreceived_pct,
+           PERF_PAYLOAD_BYTES, my_name, peer_name);
     if (s->is_aborted) printf("  (상대 보고가 끊겨 중간에 중단됨. 아래는 그때까지의 결과)\n");
     if (s->best_actual_rate == 0u) {
-        printf("  손실 없이 통과한 단계가 없습니다.\n");
+        printf("  허용 미수신율 이내로 통과한 단계가 없습니다.\n");
         return;
     }
 
     /* 결과: 확인 단계를 통과했으면 그 실제 송신량, 아니면 탐색 단계에서 통과한 최대값 */
     const uint32_t result = s->is_confirmed ? s->confirmed_rate : s->best_actual_rate;
+    const uint32_t result_sent = s->is_confirmed ? s->confirmed_sent : s->best_sent;
+    const uint32_t result_lost = s->is_confirmed ? s->confirmed_lost : s->best_lost;
     const char* note = "";
     if (!s->is_confirmed) {
         note = (s->confirm_tries > 0u) ? "  (확인 단계를 통과하지 못해 탐색 결과를 표시)"
@@ -260,6 +286,8 @@ void perf_search_print_result(const perf_search_t* s, const char* my_name, const
     printf("                %.2f Mbps (사용자 데이터 %u B 기준)\n",
            perf_rate_to_mbps(result, PERF_PAYLOAD_BYTES - PERF_HEADER_BYTES), PERF_PAYLOAD_BYTES - PERF_HEADER_BYTES);
     printf("                %.2f Mbps (메시지 %u B 기준)\n", perf_rate_to_mbps(result, PERF_PAYLOAD_BYTES), PERF_PAYLOAD_BYTES);
+    printf("  미수신      : %u개 / 보냄 %u개 (%.3f%%, 결과 단계)\n", result_lost, result_sent,
+           perf_lost_pct(result_lost, result_sent));
     if (s->fail_rate == 0u) {
         printf("  탐색        : 통과한 최대 목표 %u msg/s, 실패한 단계 없음 (%u단계, 단계마다 %u초)\n", s->pass_rate,
                s->step_no, PERF_SEARCH_SEND_US / 1000000u);
@@ -268,10 +296,10 @@ void perf_search_print_result(const perf_search_t* s, const char* my_name, const
                s->pass_rate, s->fail_rate, s->step_no, PERF_SEARCH_SEND_US / 1000000u);
     }
     if (s->is_confirmed) {
-        printf("  확인        : 목표 %u msg/s로 %u초 동안 손실 없음 (%u회째 통과)\n", s->confirmed_target_rate,
+        printf("  확인        : 목표 %u msg/s로 %u초 동안 허용 미수신율 이내 (%u회째 통과)\n", s->confirmed_target_rate,
                PERF_SEARCH_CONFIRM_US / 1000000u, s->confirm_tries);
     } else if (s->confirm_tries > 0u) {
-        printf("  확인        : %u번 시도했지만 %u초 동안 손실 없이 보내지 못함\n", s->confirm_tries,
+        printf("  확인        : %u번 시도했지만 %u초 동안 허용 미수신율 이내로 보내지 못함\n", s->confirm_tries,
                PERF_SEARCH_CONFIRM_US / 1000000u);
     }
     if (s->is_sender_limited) {

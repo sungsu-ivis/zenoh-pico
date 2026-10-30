@@ -4,7 +4,8 @@
  * brightonz.foundation의 z_perf 예제(examples/unix/c99/z_perf)와 같은 측정을 zenoh-pico 공개 API로 한다.
  * 측정 방법·메시지·스레드·출력 형식은 같고, 통신 부분만 zenoh-pico API로 바꿨다.
  *
- * 목적: 손실 0%로 보낼 수 있는 최대 처리량(max throughput)을 찾는다. 메시지 크기는 128 B.
+ * 목적: 허용 미수신율(2, 3, 5% 중 선택, 기본 2%) 이내로 보낼 수 있는 최대 처리량(max throughput)을 찾는다.
+ *       메시지 크기는 128 B.
  *   - 보내는 쪽(A): 송신량을 바꿔 가며 num0을 보내고, 상대 피드백으로 손실을 확인해 최대값을 찾는다.
  *                   탐색 순서는 perf_max_throughput.h 참고.
  *   - 받는 쪽(B)  : 받기만 하면서 0.25초마다 수신 결과(처리량·지터·손실률)를 피드백으로 돌려준다.
@@ -84,10 +85,11 @@ typedef struct {
     bool value;
 } perf_atomic_bool_t;
 
-/* 측정 설정 (각 main의 #define 값으로 채운다) */
+/* 측정 설정 (각 main의 #define 값과 실행 인자로 채운다) */
 typedef struct {
-    uint32_t drain_s;  /* 송신을 멈춘 뒤 늦게 오는 메시지를 기다리는 시간 (초) */
-    bool is_publisher; /* true: 보내는 쪽(최대 처리량 탐색), false: 받는 쪽 */
+    uint32_t drain_s;                /* 송신을 멈춘 뒤 늦게 오는 메시지를 기다리는 시간 (초) */
+    bool is_publisher;               /* true: 보내는 쪽(최대 처리량 탐색), false: 받는 쪽 */
+    uint32_t allowed_unreceived_pct; /* 보내는 쪽: 허용 미수신율 (%) */
 } perf_options_t;
 
 /* num0 수신 결과. 받는 쪽이 계산해서 status로 보내는 단위다. */
@@ -192,6 +194,10 @@ typedef struct {
     pthread_t tx_feedback_thread;
     pthread_t rx_feedback_thread;
 } perf_node_t;
+
+/* 보내는 쪽 실행 인자에서 허용 미수신율 (%)을 읽는다: 2, 3, 5 중 하나 ("3%"처럼 %를 붙여도 된다).
+ * 인자가 없거나 빈 문자열이면 2. 그 밖의 값이면 오류를 출력하고 false를 돌려준다. */
+bool perf_parse_unreceived_pct(int argc, char** argv, uint32_t* pct);
 
 /* 열린 세션으로 측정을 실행한다. publisher/subscriber 선언과 해제도 여기서 한다.
  *   보내는 쪽: 최대 처리량 탐색 → 송신 정지 → drain 대기 → 요약·결과 출력

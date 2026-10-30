@@ -725,6 +725,26 @@ static void perf_run_single_thread(perf_node_t* node, volatile sig_atomic_t* is_
 }
 #endif
 
+bool perf_parse_unreceived_pct(int argc, char** argv, uint32_t* pct) {
+    static const uint32_t allowed[] = {2u, 3u, 5u};
+    *pct = PERF_DEFAULT_UNRECEIVED_PCT;
+    if ((argc < 2) || (argv[1][0] == '\0')) return true; /* 주지 않으면 기본값 */
+    if (argc == 2) {
+        for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
+            char plain[8];
+            char with_percent[8];
+            snprintf(plain, sizeof(plain), "%u", allowed[i]);
+            snprintf(with_percent, sizeof(with_percent), "%u%%", allowed[i]);
+            if ((strcmp(argv[1], plain) == 0) || (strcmp(argv[1], with_percent) == 0)) {
+                *pct = allowed[i];
+                return true;
+            }
+        }
+    }
+    fprintf(stderr, "사용법: %s [허용 미수신율 2|3|5 (%%), 주지 않으면 %u]\n", argv[0], PERF_DEFAULT_UNRECEIVED_PCT);
+    return false;
+}
+
 int perf_run(perf_node_t* node, const z_owned_session_t* session, const char* my_name, const char* peer_name,
              const perf_options_t* options, volatile sig_atomic_t* is_stop_requested) {
     if (!perf_node_open(node, session, my_name, peer_name, options)) return 1;
@@ -734,9 +754,10 @@ int perf_run(perf_node_t* node, const z_owned_session_t* session, const char* my
 
     /* 보내는 쪽은 최대 처리량을 탐색하고, 받는 쪽은 받으면서 status를 보내다가 상대가 끝나면 따라 끝난다 */
     if (options->is_publisher) {
-        perf_search_init(&node->search, node->start_us);
+        perf_search_init(&node->search, node->start_us, options->allowed_unreceived_pct);
         perf_target_rate_set(node, node->search.target_rate);
-        printf("제어기 %s 시작 (보내는 쪽: 최대 처리량 탐색, 손실 0%%, 메시지 %u B)\n", my_name, PERF_PAYLOAD_BYTES);
+        printf("제어기 %s 시작 (보내는 쪽: 최대 처리량 탐색, 허용 미수신율 %u%%, 메시지 %u B)\n", my_name,
+               options->allowed_unreceived_pct, PERF_PAYLOAD_BYTES);
     } else {
         printf("제어기 %s 시작 (받는 쪽: 상대가 끝나면 함께 끝남)\n", my_name);
     }
