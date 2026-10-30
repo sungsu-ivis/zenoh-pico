@@ -33,6 +33,11 @@
 #   이 PC의 커널, CPU, 클럭 정책, NIC(이름·속도·MTU·IPv4·드라이버), endpoint를 로그와 요약 맨 위에 남긴다.
 #   회차마다 커널 UDP 카운터의 증가분(보낸·받은 데이터그램, 수신 버퍼 부족으로 버린 수)도 요약에 남긴다.
 #
+# 허용 미수신율
+#   한 단계의 미수신 수가 그 단계에 보낸 수의 이 % 이하면 손실로 실패하지 않는다 (UDP는 손실이 조금씩 날 수 있다).
+#   LOSS_PCT로 2, 3, 5 중에서 고른다. 주지 않으면 2. 보내는 쪽(tester)에만 쓰인다.
+#   예: LOSS_PCT=3 ./test_start.sh tester
+#
 # 사용법: ./test_start.sh tester|peer [로그 폴더]
 #   로그 폴더를 주지 않으면 지금 폴더에 회차별 tester_log_N.txt(또는 peer_log_N.txt)와 result_summary.txt를 쓴다.
 #   한 회차는 보통 1분쯤 걸린다 (RUNS=3이면 약 3분).
@@ -52,6 +57,9 @@ ROLE="${1:-}"
 LOG_DIR="${2:-$PWD}"
 SUMMARY="${LOG_DIR}/result_summary.txt"
 
+LOSS_PCT="${LOSS_PCT:-2}" # 허용 미수신율 (%): 2, 3, 5 중 하나. 보내는 쪽(tester)에만 쓰인다
+LOSS_PCT="${LOSS_PCT%\%}"  # "3%"처럼 써도 된다
+
 RUNS=3       # 측정 횟수 (홀수, 두 PC가 같아야 한다). 결과는 중앙값으로 보고한다
 RUN_GAP_S=9  # tester: 회차 사이에 쉬는 시간. 받는 쪽이 이전 회차를 끝내고(count가 끊긴 뒤 약 7초) 다시 뜨는 시간보다 길어야 한다
 
@@ -69,10 +77,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 case "$ROLE" in
     tester)
         EXE="${SCRIPT_DIR}/bin/z_perf_tester"
+        EXE_ARGS=("$LOSS_PCT")
         LOG_PREFIX="tester_log"
+        case "$LOSS_PCT" in
+            2 | 3 | 5) ;;
+            *)
+                echo "LOSS_PCT(허용 미수신율)는 2, 3, 5 중 하나입니다 (지금 '${LOSS_PCT}'). 주지 않으면 2입니다." >&2
+                exit 1
+                ;;
+        esac
         ;;
     peer)
         EXE="${SCRIPT_DIR}/bin/z_perf_peer"
+        EXE_ARGS=()
         LOG_PREFIX="peer_log"
         ;;
     *)
@@ -278,7 +295,7 @@ run_once() {
     echo
     echo "===== ${run}/${RUNS}회 시작 (${ROLE}) → $log ====="
     echo "${conditions} | ${run}/${RUNS}회" >"$log"
-    ${launch[@]+"${launch[@]}"} "$EXE" >>"$log" 2>&1 &
+    ${launch[@]+"${launch[@]}"} "$EXE" ${EXE_ARGS[@]+"${EXE_ARGS[@]}"} >>"$log" 2>&1 &
     child_pid=$!
     if [ "$ROLE" = "tester" ]; then
         echo "측정 중입니다 (약 1분). 진행 상황: tail -f $log"
@@ -303,9 +320,9 @@ run_once() {
 result_of() {
     local log=$1 value state
     value=$(sed -n 's/^  결과 *: \([0-9][0-9]*\) msg\/s.*/\1/p' "$log" | head -n 1)
-    [ -z "$value" ] && value=0 # 손실 없이 통과한 단계가 없음
+    [ -z "$value" ] && value=0 # 허용 미수신율 이내로 통과한 단계가 없음
     state="확인 실패"
-    grep -q '^  확인 *: 목표 .*손실 없음' "$log" && state="확인 통과"
+    grep -q '^  확인 *: 목표 .*허용 미수신율 이내 (' "$log" && state="확인 통과"
     grep -q '탐색이 끝나기 전에 멈춰' "$log" && state="중단됨"
     echo "${value}|${state}"
 }
@@ -366,7 +383,7 @@ done
         echo "===== 받는 쪽 요약 (결과 송신량은 보내는 쪽 PC의 result_summary.txt에 있다) ====="
         for line in "${lines[@]}"; do echo "$line"; done
     else
-        echo "===== 결과 요약 (${#done_runs[@]}회 중앙값, 손실 0%, 메시지 128 B) ====="
+        echo "===== 결과 요약 (${#done_runs[@]}회 중앙값, 허용 미수신율 ${LOSS_PCT}%, 메시지 128 B) ====="
         for line in "${lines[@]}"; do echo "$line"; done
         if [ "${#done_runs[@]}" -eq 0 ]; then
             echo "  끝까지 마친 회차가 없어 중앙값을 낼 수 없습니다."

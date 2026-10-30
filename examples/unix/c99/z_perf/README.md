@@ -1,6 +1,6 @@
 # z_perf: 최대 처리량 측정 (zenoh-pico)
 
-손실 0%로 보낼 수 있는 128 B 메시지의 최대 송신량(msg/s)을 찾는다.
+미수신율이 허용 미수신율(2, 3, 5% 중 선택, 기본 2%) 이하로 보낼 수 있는 128 B 메시지의 최대 송신량(msg/s)을 찾는다.
 brightonz.foundation의 z_perf 예제와 같은 측정이다. 탐색·판정 코드(`perf_max_throughput.*`)는 그 예제와 같고, 통신 부분만 zenoh-pico API로 바꿨다.
 
 - 보내는 쪽 A: `z_perf_tester`. 500,000 msg/s부터 송신량을 2배씩 올리거나(처음부터 실패하면 절반씩 내리고) 이분 탐색으로 좁힌 뒤, 15초 확인으로 결과를 정한다.
@@ -85,6 +85,9 @@ cd ~/workspace/zenoh-pico && ./build/examples/z_perf/test_start.sh tester ~/zper
 ```
 
 - 3회 측정해 중앙값을 보고한다. 한 회차는 1분쯤, 전체는 약 3분 걸린다. 측정 중에는 두 PC를 쓰지 않는다.
+- 허용 미수신율은 보내는 쪽에서 `LOSS_PCT`로 고른다 (2, 3, 5. 주지 않으면 2).
+  예: `LOSS_PCT=3 ./build/examples/z_perf/test_start.sh tester ~/zperf_logs/zp`.
+  한 단계의 미수신 수가 그 단계에 보낸 수의 이 % 이하이고 목표의 95% 이상 보냈으면 통과다.
 - 결과는 보내는 쪽 PC의 `result_summary.txt`에 있다. 회차별 로그는 `tester_log_N.txt`, `peer_log_N.txt`.
 - 스크립트는 바이너리에 든 `#iface=`로 NIC를 확인한다. NIC가 없거나 꺼져 있거나 `lo`이면 시작하지 않는다.
 - 두 PC 모두 같은 CPU(`PIN_CPU=3`)에 프로그램을 묶는다.
