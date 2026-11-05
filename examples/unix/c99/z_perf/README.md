@@ -113,11 +113,11 @@ cd ~/workspace/zenoh-pico && ./build/examples/z_perf/test_start.sh tester ~/zper
 같은 측정을 TCP 연결 하나로 한다. B가 자기 IP로 연결을 기다리고(listen), A가 그 IP로 접속한다(connect).
 zenoh-pico 1.6.1은 UDP unicast를 받는 쪽(listen)이 없어, unicast는 TCP로 잰다.
 
-1. B(받는 쪽) PC의 IP를 두 파일의 TCP `PERF_LOCATOR`에 똑같이 넣는다. 지금 값은 `tcp/169.254.236.32:19155`다.
+1. B(받는 쪽) PC의 IP를 두 파일의 TCP `PERF_LOCATOR`에 똑같이 넣는다. 지금 값은 `tcp/10.0.128.111:19155`다.
 
    ```c
    #if PERF_TRANSPORT_TCP
-   #define PERF_LOCATOR "tcp/169.254.236.32:19155" /* B(받는 쪽) PC의 IP와 포트 */
+   #define PERF_LOCATOR "tcp/10.0.128.111:19155" /* B(받는 쪽) PC의 IP와 포트 */
    ```
 
 2. 3장처럼 빌드한다. `z_perf_tcp_tester`, `z_perf_tcp_peer`가 `PERF_TRANSPORT_TCP=1`로 빌드되어

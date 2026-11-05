@@ -33,7 +33,7 @@
 #define PERF_TRANSPORT_TCP 0 /* 1: TCP unicast. CMake가 z_perf_tcp_* 대상(build/examples/z_perf_tcp/)에 1을 준다 */
 #endif
 #if PERF_TRANSPORT_TCP
-#define PERF_LOCATOR "tcp/169.254.236.32:19155" /* B(받는 쪽) PC의 IP와 포트. 두 PC 모두 같은 값 */
+#define PERF_LOCATOR "tcp/10.0.128.111:19155" /* B(받는 쪽) PC의 IP와 포트. 두 PC 모두 같은 값 */
 #else
 #define PERF_LOCATOR "udp/239.192.0.78:19153#iface=enp7s0" /* multicast 그룹과 이 PC의 NIC */
 #endif
