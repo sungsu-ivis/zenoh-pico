@@ -218,8 +218,8 @@ static void* perf_scheduler_main(void* arg) {
 #endif
 
 /* ===================================================================
- * 수신: zenoh-pico 읽기 태스크에서 불리는 콜백 (subscriber마다 하나, context는 perf_node_t*)
- * (MT0에서는 메인 스레드의 zp_read 안에서 불린다)
+ * 수신: zenoh-pico executor 스레드에서 불리는 콜백 (subscriber마다 하나, context는 perf_node_t*)
+ * (MT0에서는 메인 스레드의 zp_spin_once 안에서 불린다)
  * =================================================================== */
 
 /* D 하나를 지터 통계에 넣는다 */
@@ -658,42 +658,30 @@ static void perf_run_threads(perf_node_t* node, volatile sig_atomic_t* is_stop_r
     pthread_join(node->rx_feedback_thread, NULL);
 }
 #else
-/* MT0 (싱글스레드): 라이브러리에 읽기·lease 태스크가 없으므로 이 프로그램도 스레드를 만들지 않는다.
+/* MT0 (싱글스레드): 라이브러리에 스레드가 없으므로 이 프로그램도 스레드를 만들지 않는다.
  * 메인 스레드가 아래 일을 차례로 되풀이한다. tick 시각표는 MT1의 세 스레드와 같다.
- *   - zp_read: 받은 메시지를 처리한다(구독 콜백 호출). 받을 것이 없으면 소켓 timeout(Z_CONFIG_SOCKET_TIMEOUT)만큼
- *     기다렸다 돌아온다. MT0 빌드는 이 값을 1 ms로 둔다 (커널은 tick 단위로 올리므로 실제로는 1~10 ms)
- *   - lease 태스크가 하던 일: keep-alive는 lease/Z_TRANSPORT_LEASE_EXPIRE_FACTOR마다, JOIN은 Z_JOIN_INTERVAL마다 보낸다
+ *   - zp_spin_once: 라이브러리 태스크 하나(수신·콜백 호출, keep-alive·JOIN 송신, TCP accept)를 돌린다.
+ *     수신은 받을 것이 없으면 소켓 timeout(Z_CONFIG_SOCKET_TIMEOUT)만큼 기다렸다 돌아온다.
+ *     MT0 빌드는 이 값을 1 ms로 둔다 (커널은 tick 단위로 올리므로 실제로는 1~10 ms)
  *   - 보내는 쪽: 1 ms마다 스케줄러 tick
  *   - 0.25초마다 TX 피드백 tick (1초 경계부터), RX 피드백 tick (반 박자 뒤부터) */
 static void perf_run_single_thread(perf_node_t* node, volatile sig_atomic_t* is_stop_requested) {
     const z_loaned_session_t* session = z_session_loan(node->session);
     const uint64_t feedback_period_us = (uint64_t)PERF_FEEDBACK_PERIOD_MS * 1000u;
-    const uint64_t keep_alive_period_us = (uint64_t)Z_TRANSPORT_LEASE / Z_TRANSPORT_LEASE_EXPIRE_FACTOR * 1000u;
-    const uint64_t join_period_us = (uint64_t)Z_JOIN_INTERVAL * 1000u;
     uint64_t now = perf_now_us();
     uint64_t next_schedule_us = now;
     uint64_t tick_ms = 0u;
     uint64_t rate_credit = 0u;
     uint64_t next_tx_feedback_us = (now / 1000000u + 1u) * 1000000u; /* 다음 1초 경계 */
     uint64_t next_rx_feedback_us = next_tx_feedback_us + feedback_period_us / 2u;
-    uint64_t next_keep_alive_us = now + keep_alive_period_us;
-    uint64_t next_join_us = now;                   /* 시작하자마자 한 번 보낸다 */
     uint64_t next_finish_check_us = now + 100000u; /* MT1처럼 0.1초마다 끝낼 때인지 본다 */
     uint64_t drain_end_us = 0u;                    /* 0이면 아직 송신 중 */
     bool is_publishing = node->options.is_publisher;
 
     for (;;) {
-        (void)zp_read(session, NULL); /* 받을 것이 없으면 timeout으로 돌아온다 (오류가 아니다) */
+        (void)zp_spin_once(session);
         now = perf_now_us();
-        if (now >= next_keep_alive_us) {
-            (void)zp_send_keep_alive(session, NULL);
-            next_keep_alive_us += keep_alive_period_us;
-        }
-        if (now >= next_join_us) {
-            (void)zp_send_join(session, NULL);
-            next_join_us += join_period_us;
-        }
-        /* zp_read가 받을 것 없이 기다리면 그동안의 tick이 밀린다 (소켓 timeout은 커널 tick 단위로 올라가 1 ms보다 길다).
+        /* zp_spin_once가 받을 것 없이 기다리면 그동안의 tick이 밀린다 (소켓 timeout은 커널 tick 단위로 올라가 1 ms보다 길다).
          * 밀린 tick은 여기서 이어서 돌아 평균 송신량을 목표에 맞춘다 */
         while (is_publishing && (now >= next_schedule_us)) {
             perf_scheduler_tick(node, tick_ms++, &rate_credit);

@@ -25,7 +25,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macOS-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Compile debug
         run: make all
         env:
@@ -40,10 +40,18 @@ jobs:
     name: Build on ubuntu-latest
     runs-on: ubuntu-latest
     steps:
-      - name: Uninstall pre-installed packages
-        run: sudo apt remove dotnet* azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox temurin-8-jdk powershell mysql-server-core-8.0 mono-devel -y
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Crosscompile debug
         run: make crossbuilds
         env:

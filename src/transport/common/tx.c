@@ -25,6 +25,14 @@
 #include "zenoh-pico/utils/endianness.h"
 #include "zenoh-pico/utils/logging.h"
 
+#if defined(Z_TEST_HOOKS)
+#include "zenoh-pico/session/loopback.h"
+
+static _z_session_send_override_fn _z_send_n_msg_override = NULL;
+
+void _z_transport_set_send_n_msg_override(_z_session_send_override_fn fn) { _z_send_n_msg_override = fn; }
+#endif
+
 /*------------------ Transmission helper ------------------*/
 
 static inline bool _z_transport_tx_get_express_status(const _z_network_message_t *msg) {
@@ -399,6 +407,10 @@ z_result_t _z_link_send_t_msg(const _z_link_t *zl, const _z_transport_message_t 
     // Create and prepare the buffer to serialize the message on
     uint16_t mtu = (zl->_mtu < Z_BATCH_UNICAST_SIZE) ? zl->_mtu : Z_BATCH_UNICAST_SIZE;
     _z_wbuf_t wbf = _z_wbuf_make(mtu, false);
+    if (_z_wbuf_capacity(&wbf) != mtu) {
+        _Z_ERROR_LOG(_Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        return _Z_ERR_SYSTEM_OUT_OF_MEMORY;
+    }
 
     switch (zl->_cap._flow) {
         case Z_LINK_CAP_FLOW_STREAM:
@@ -450,8 +462,7 @@ z_result_t __unsafe_z_serialize_zenoh_fragment(_z_wbuf_t *dst, _z_wbuf_t *src, z
     do {
         size_t w_pos = _z_wbuf_get_wpos(dst);  // Mark the buffer for the writing operation
 
-        _z_transport_message_t f_hdr =
-            _z_t_msg_make_fragment_header(sn, reliability == Z_RELIABILITY_RELIABLE, is_final, first, false);
+        _z_transport_message_t f_hdr = _z_t_msg_make_fragment_header(sn, reliability, is_final, first, false);
         ret = _z_transport_message_encode(dst, &f_hdr);  // Encode the frame header
         if (ret == _Z_RES_OK) {
             size_t space_left = _z_wbuf_space_left(dst);
@@ -474,6 +485,15 @@ z_result_t __unsafe_z_serialize_zenoh_fragment(_z_wbuf_t *dst, _z_wbuf_t *src, z
 
 z_result_t _z_send_n_msg(_z_session_t *zn, const _z_network_message_t *z_msg, z_reliability_t reliability,
                          z_congestion_control_t cong_ctrl, void *peer) {
+#if defined(Z_TEST_HOOKS)
+    if (_z_send_n_msg_override != NULL) {
+        bool handled = false;
+        z_result_t override_ret = _z_send_n_msg_override(zn, z_msg, reliability, cong_ctrl, peer, &handled);
+        if (handled) {
+            return override_ret;
+        }
+    }
+#endif
     z_result_t ret = _Z_RES_OK;
     // Call transport function
     switch (zn->_tp._type) {

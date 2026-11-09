@@ -124,6 +124,10 @@ void _z_task_free(_z_task_t **task) {
     *task = NULL;
 }
 
+_z_task_id_t _z_task_get_id(const _z_task_t *task) { return *task; }
+_z_task_id_t _z_task_current_id(void) { return pthread_self(); }
+bool _z_task_id_equal(const _z_task_id_t *l, const _z_task_id_t *r) { return pthread_equal(*l, *r) != 0; }
+
 /*------------------ Mutex ------------------*/
 z_result_t _z_mutex_init(_z_mutex_t *m) { _Z_CHECK_SYS_ERR(pthread_mutex_init(m, NULL)); }
 
@@ -156,6 +160,7 @@ z_result_t _z_condvar_init(_z_condvar_t *cv) {
     pthread_condattr_t attr;
     pthread_condattr_init(&attr);
 #ifndef ZENOH_MACOS
+    // macos does not have pthread_condattr_setclock function
     pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
 #endif
     _Z_CHECK_SYS_ERR(pthread_cond_init(cv, &attr));
@@ -170,7 +175,26 @@ z_result_t _z_condvar_signal_all(_z_condvar_t *cv) { _Z_CHECK_SYS_ERR(pthread_co
 z_result_t _z_condvar_wait(_z_condvar_t *cv, _z_mutex_t *m) { _Z_CHECK_SYS_ERR(pthread_cond_wait(cv, m)); }
 
 z_result_t _z_condvar_wait_until(_z_condvar_t *cv, _z_mutex_t *m, const z_clock_t *abstime) {
+#ifndef ZENOH_MACOS
     int error = pthread_cond_timedwait(cv, m, abstime);
+#else
+    // pthread_cond_timedwait does not work for macos since it assumes REALTIME_CLOCK
+    // while z_clock_t corresponds to MONOTONIC_CLOCK.
+    z_clock_t deadline = {0};
+    z_clock_t now = z_clock_now();
+    if (now.tv_sec < abstime->tv_sec) {
+        deadline.tv_sec = abstime->tv_sec - now.tv_sec;
+        if (now.tv_nsec <= abstime->tv_nsec) {
+            deadline.tv_nsec = abstime->tv_nsec - now.tv_nsec;
+        } else {
+            deadline.tv_sec--;
+            deadline.tv_nsec += 1000000000 + abstime->tv_nsec - now.tv_nsec;
+        }
+    } else if (now.tv_sec == abstime->tv_sec && now.tv_nsec < abstime->tv_nsec) {
+        deadline.tv_nsec = abstime->tv_nsec - now.tv_nsec;
+    }
+    int error = pthread_cond_timedwait_relative_np(cv, m, &deadline);
+#endif
 
     if (error == ETIMEDOUT) {
         return Z_ETIMEDOUT;
@@ -208,30 +232,39 @@ z_clock_t z_clock_now(void) {
     return now;
 }
 
+unsigned long zp_clock_elapsed_us_since(z_clock_t *instant, z_clock_t *epoch) {
+    long elapsed = (1000000 * (instant->tv_sec - epoch->tv_sec) + (instant->tv_nsec - epoch->tv_nsec) / 1000);
+    return elapsed > 0 ? (unsigned long)elapsed : 0;
+}
+
+unsigned long zp_clock_elapsed_ms_since(z_clock_t *instant, z_clock_t *epoch) {
+    long elapsed = (1000 * (instant->tv_sec - epoch->tv_sec) + (instant->tv_nsec - epoch->tv_nsec) / 1000000);
+    return elapsed > 0 ? (unsigned long)elapsed : 0;
+}
+
+unsigned long zp_clock_elapsed_s_since(z_clock_t *instant, z_clock_t *epoch) {
+    long elapsed = (instant->tv_sec - epoch->tv_sec);
+    return elapsed > 0 ? (unsigned long)elapsed : 0;
+}
+
 unsigned long z_clock_elapsed_us(z_clock_t *instant) {
     z_clock_t now;
     clock_gettime(CLOCK_MONOTONIC, &now);
-
-    unsigned long elapsed =
-        (unsigned long)(1000000 * (now.tv_sec - instant->tv_sec) + (now.tv_nsec - instant->tv_nsec) / 1000);
-    return elapsed;
+    return zp_clock_elapsed_us_since(&now, instant);
 }
 
 unsigned long z_clock_elapsed_ms(z_clock_t *instant) {
     z_clock_t now;
     clock_gettime(CLOCK_MONOTONIC, &now);
 
-    unsigned long elapsed =
-        (unsigned long)(1000 * (now.tv_sec - instant->tv_sec) + (now.tv_nsec - instant->tv_nsec) / 1000000);
-    return elapsed;
+    return zp_clock_elapsed_ms_since(&now, instant);
 }
 
 unsigned long z_clock_elapsed_s(z_clock_t *instant) {
     z_clock_t now;
     clock_gettime(CLOCK_MONOTONIC, &now);
 
-    unsigned long elapsed = (unsigned long)(now.tv_sec - instant->tv_sec);
-    return elapsed;
+    return zp_clock_elapsed_s_since(&now, instant);
 }
 
 void z_clock_advance_us(z_clock_t *clock, unsigned long duration) {
@@ -296,9 +329,11 @@ unsigned long z_time_elapsed_s(z_time_t *time) {
 }
 
 z_result_t _z_get_time_since_epoch(_z_time_since_epoch *t) {
-    z_time_t now;
-    gettimeofday(&now, NULL);
+    struct timespec now;
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
+        return _Z_ERR_SYSTEM_GENERIC;
+    }
     t->secs = (uint32_t)now.tv_sec;
-    t->nanos = (uint32_t)now.tv_usec * 1000;
-    return 0;
+    t->nanos = (uint32_t)now.tv_nsec;
+    return _Z_RES_OK;
 }
