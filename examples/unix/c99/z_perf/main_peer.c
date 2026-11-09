@@ -64,21 +64,13 @@ int main(void) {
     zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_LISTEN_KEY, PERF_LOCATOR);
 
     z_owned_session_t session;
-    if (z_open(&session, z_config_move(&config), NULL) != Z_OK) {
-        fprintf(stderr, "세션을 열지 못했습니다: %s\n", PERF_LOCATOR);
+    const z_result_t opened = z_open(&session, z_config_move(&config), NULL);
+    if (opened != Z_OK) {
+        fprintf(stderr, "세션을 열지 못했습니다: %s (오류 %d)\n", PERF_LOCATOR, (int)opened);
         return 1;
     }
-#if Z_FEATURE_MULTI_THREAD == 1
-    /* z_open은 태스크를 띄우지 않는다. 읽기 태스크는 수신 콜백을, lease 태스크는 keep-alive(multicast는 JOIN도)를 맡는다 */
-    if ((zp_start_read_task(z_session_loan_mut(&session), NULL) != Z_OK) ||
-        (zp_start_lease_task(z_session_loan_mut(&session), NULL) != Z_OK)) {
-        fprintf(stderr, "읽기·lease 태스크를 시작하지 못했습니다\n");
-        z_session_drop(z_session_move(&session));
-        return 1;
-    }
-#else
-    /* MT0: 태스크가 없다. 수신(zp_read)과 keep-alive·JOIN 송신은 perf_run의 메인 루프가 직접 한다 */
-#endif
+    /* MT1: z_open이 executor 스레드를 띄운다 (수신 콜백, keep-alive·JOIN, TCP accept).
+     * MT0: 스레드가 없다. perf_run의 메인 루프가 zp_spin_once로 같은 일을 한다 */
 #if PERF_TRANSPORT_TCP
     printf("zenoh-pico %s | %s | unicast batch %u B | MULTI_THREAD=%d\n", ZENOH_PICO, PERF_LOCATOR,
            (unsigned)Z_BATCH_UNICAST_SIZE, Z_FEATURE_MULTI_THREAD);
@@ -96,7 +88,7 @@ int main(void) {
 #else
 int main(void) {
     printf("ERROR: z_perf needs Z_FEATURE_PUBLICATION, SUBSCRIPTION, BATCHING and LINK_UDP_MULTICAST\n"
-           "       (TCP: LINK_TCP and UNICAST_PEER, which 1.6.1 enables only with MULTI_THREAD=1).\n");
+           "       (TCP: LINK_TCP and UNICAST_PEER).\n");
     return -2;
 }
 #endif

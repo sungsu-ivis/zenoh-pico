@@ -52,24 +52,23 @@ cmake --build build --target z_perf_tester z_perf_peer z_perf_tcp_tester z_perf_
 - `BATCH_UNICAST_SIZE=1450`: TCP에서 batch 하나의 최대 크기. multicast와 같은 크기로 맞춰, 전송 방식만 바꾼 비교가 되게 한다.
 - 실행 파일은 `build/examples/z_perf/bin/`, 실행 스크립트는 `build/examples/z_perf/test_start.sh`에 생긴다.
   TCP로 빌드한 것은 `build/examples/z_perf_tcp/`에 같은 이름으로 따로 생긴다 (6장).
-- configure가 `include/zenoh-pico.h`, `include/zenoh-pico/config.h`, `library.json`, `zenohpico.pc`를 다시 쓴다.
-  저장소에 들어 있는 값이 오래된 것이라 수정으로 보이는데, 빌드 산출물이므로 커밋하지 않는다.
+- 설정값은 빌드 폴더의 `include/zenoh-pico/config.h`에 생긴다 (소스 폴더는 바뀌지 않는다).
 
 ### 싱글스레드(MT0)로 빌드할 때
 
-MT1의 `build`와 따로 `build_mt0`에 빌드한다. multicast만 잴 수 있다
-(1.6.1은 MT0에서 unicast peer를 끄므로 TCP 직접 연결이 없다. `z_perf_tcp_*`는 안내만 출력하고 끝난다).
+MT1의 `build`와 따로 `build_mt0`에 빌드한다. multicast와 TCP를 잴 수 있다.
 
 ```sh
 cmake -S . -B build_mt0 -DCMAKE_BUILD_TYPE=Release -DZ_FEATURE_MULTI_THREAD=0 -DZ_CONFIG_SOCKET_TIMEOUT=1 -DZ_FEATURE_MULTICAST_DECLARATIONS=1 -DZ_FEATURE_MULTICAST_LOOPBACK=0 -DBATCH_MULTICAST_SIZE=1450 -DBATCH_UNICAST_SIZE=1450 -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF
-cmake --build build_mt0 --target z_perf_tester z_perf_peer
+cmake --build build_mt0 --target z_perf_tester z_perf_peer z_perf_tcp_tester z_perf_tcp_peer
 ```
 
-- MT0에는 읽기·lease 태스크가 없다. 메인 루프 하나가 `zp_read`(수신 콜백), keep-alive·JOIN 송신, 송신 tick, 피드백을 돌린다.
-- `Z_CONFIG_SOCKET_TIMEOUT=1`: 받을 것이 없을 때 `zp_read`가 기다리는 시간(기본 100 ms)을 줄여 송신 tick이 덜 밀리게 한다.
+- MT0에는 라이브러리 스레드가 없다. 메인 루프 하나가 `zp_spin_once`(수신 콜백, keep-alive·JOIN 송신, TCP accept),
+  송신 tick, 피드백을 돌린다. 1.10.2에서 `zp_read`·`zp_send_keep_alive`·`zp_send_join`은 deprecated이고,
+  `zp_read`는 클라이언트 전용 경로라 TCP 받는 쪽(listen)에서 쓰면 죽는다.
+- `Z_CONFIG_SOCKET_TIMEOUT=1`: 받을 것이 없을 때 수신이 기다리는 시간(기본 100 ms)을 줄여 송신 tick이 덜 밀리게 한다.
   커널이 tick 단위로 올리므로 실제로는 1~10 ms이고, 그동안 밀린 송신 tick은 이어서 돌아 평균 송신량을 맞춘다.
-- configure는 소스 폴더의 `include/zenoh-pico/config.h`를 다시 쓰므로, `build`와 `build_mt0`를 번갈아 빌드할 때는
-  빌드 직전에 그 폴더의 configure를 다시 한다. 빌드된 실행 파일은 정적 링크라 이후 configure의 영향을 받지 않는다.
+- `build`와 `build_mt0`는 설정값을 각자의 빌드 폴더에 두므로 configure·빌드 순서는 상관없다.
 - 실행은 4장과 같고 폴더만 `build_mt0`다. 로그 첫 줄의 `MULTI_THREAD=0`으로 확인한다.
 
 ## 4. 실행 (받는 쪽을 먼저)
@@ -103,15 +102,16 @@ cd ~/workspace/zenoh-pico && ./build/examples/z_perf/test_start.sh tester ~/zper
 - **받는 쪽(B)을 반드시 먼저 띄운다.** zenoh-pico publisher는 상대 subscriber가 있을 때만 보낸다(write filter).
   라우터 없는 peer 모드에서는 선언하는 순간에 이미 있는 subscriber만 찾으므로, A가 먼저 뜨면 B가 나중에 떠도 A는 아무것도 보내지 않는다.
   이 경우 A는 워밍업 뒤 "상대 보고가 15초 동안 따라오지 않아 탐색을 중단합니다"로 끝난다.
-- **A는 자기가 보낸 데이터그램도 받는다.** zenoh-pico는 multicast 되돌림(IP_MULTICAST_LOOP)을 끄지 않아,
-  A의 읽기 태스크가 자기 데이터그램을 받아 버린다. 이 처리도 A의 CPU를 쓴다 (brightonz.foundation 예제는 `loopback: false`).
+- **multicast 되돌림은 `Z_FEATURE_MULTICAST_LOOPBACK=0`으로 끈다.** upstream zenoh-pico에는 이 옵션이 없어
+  A가 자기 데이터그램을 다시 받아 버린다. 이 브랜치가 옵션을 더했다 (7장).
 - **단방향 지연은 재지 않는다.** 두 PC의 시계 기준이 달라서다. 지터는 같은 PC 시계끼리의 차이라 그대로 맞다.
-- 이 브랜치는 zenoh-pico 1.6.1 기준이다. 1.6.1의 `z_open`은 태스크를 띄우지 않으므로 `main`에서 읽기·lease 태스크를 직접 시작한다.
+- 이 브랜치는 zenoh-pico 1.10.2 기준이다. MT1에서는 `z_open`이 executor 스레드를 띄워 수신·keep-alive·JOIN·TCP accept를 맡는다.
 
 ## 6. TCP unicast로 재기
 
 같은 측정을 TCP 연결 하나로 한다. B가 자기 IP로 연결을 기다리고(listen), A가 그 IP로 접속한다(connect).
-zenoh-pico 1.6.1은 UDP unicast를 받는 쪽(listen)이 없어, unicast는 TCP로 잰다.
+zenoh-pico 1.10.2는 peer 모드에서 UDP unicast로 기다리는 기능(listen)이 없어, unicast는 TCP로 잰다
+(`src/link/link.c`의 `_z_listen_link`에 UDP unicast가 없어 `z_open`이 -92로 실패한다).
 
 1. B(받는 쪽) PC의 IP를 두 파일의 TCP `PERF_LOCATOR`에 똑같이 넣는다. 지금 값은 `tcp/10.0.128.111:19155`다.
 
@@ -122,7 +122,7 @@ zenoh-pico 1.6.1은 UDP unicast를 받는 쪽(listen)이 없어, unicast는 TCP�
 
 2. 3장처럼 빌드한다. `z_perf_tcp_tester`, `z_perf_tcp_peer`가 `PERF_TRANSPORT_TCP=1`로 빌드되어
    `build/examples/z_perf_tcp/bin/`에 생긴다.
-3. 실행은 4장과 같고, 폴더만 `z_perf_tcp`다 (받는 쪽을 먼저):
+3. 실행은 4장과 같고, 폴더만 `z_perf_tcp`다 (받는 쪽을 먼저). MT0는 `build_mt0/examples/z_perf_tcp/`다:
 
    ```sh
    # 받는 쪽 PC (먼저)
@@ -135,9 +135,14 @@ zenoh-pico 1.6.1은 UDP unicast를 받는 쪽(listen)이 없어, unicast는 TCP�
 - 스크립트는 바이너리에 든 `tcp/IP`로 NIC를 찾는다. 받는 쪽은 그 IP를 가진 NIC, 보내는 쪽은 그 IP로 가는 경로의 NIC다.
   받는 쪽 PC에 그 IP가 없거나, 보내는 쪽 PC가 그 IP를 가지고 있으면(같은 PC) 시작하지 않는다.
 - TCP는 흐름 제어가 있어 받는 쪽이 늦으면 보내는 쪽 put이 기다린다(BLOCK). 그래서 손실 없이 "목표만큼 못 보냄"으로 한계가 나온다.
-- 이 브랜치(perfTest)는 1.6.1 그대로가 아니다. peer TCP 버그 2개를 고친 커밋이 들어 있다. 고치지 않은 1.6.1은
-  128k msg/s쯤에서 받는 쪽 스트림이 어긋나 연결이 끊기므로 TCP 측정이 안 된다. 결과에는 "1.6.1 + TCP peer 버그 2개 수정"으로 적는다.
-  1. 받는 쪽 (`src/transport/unicast/read.c`): 길이 2바이트가 두 번에 나뉘어 오면 상태를 되돌리지 않아,
-     다음 메시지 길이를 잘못 읽는다 ("Unknown message type received").
-  2. 보내는 쪽 (`src/link/link.c`): peer 모드 소켓이 non-blocking이라, 송신 버퍼가 차면 batch를 버리거나
-     앞부분만 보낸다. 쓸 수 있을 때까지 기다렸다가 이어서 보내게 고쳤다 (이제 BLOCK이 TCP에서도 실제로 기다린다).
+
+## 7. upstream 1.10.2와 다른 점 (라이브러리)
+
+이 브랜치(perfTest)는 1.10.2 그대로가 아니다. 결과에는 "zenoh-pico 1.10.2 + 아래 3개"로 적는다.
+
+1. peer TCP 받는 쪽 (`src/transport/unicast/read.c`): 길이 2바이트가 두 번에 나뉘어 오면 상태를 되돌리지 않아,
+   다음 메시지 길이를 잘못 읽는다 ("Unknown message type received"). 1.6.1에서 찾은 버그이고 1.10.2에도 같은 코드가 남아 있다.
+2. peer TCP 보내는 쪽 (`src/link/link.c`): peer 모드 소켓이 non-blocking이라, 송신 버퍼가 차면 batch를 버리거나
+   앞부분만 보낸다. 쓸 수 있을 때까지 기다렸다가 이어서 보내게 고쳤다 (BLOCK이 TCP에서도 실제로 기다린다). 1.10.2에도 같은 코드다.
+3. `Z_FEATURE_MULTICAST_LOOPBACK` 옵션 (`cmake/feature_config.cmake`, `include/zenoh-pico/config.h.in`,
+   `src/link/transport/udp/udp_multicast_posix.c`): 0이면 multicast 송신 소켓의 `IP_MULTICAST_LOOP`를 끈다. 기본값 1은 upstream과 같다.
