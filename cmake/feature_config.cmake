@@ -47,6 +47,7 @@ set(Z_FEATURE_RX_CACHE 0 CACHE STRING "Toggle RX_CACHE")
 set(Z_FEATURE_UNICAST_PEER 1 CACHE STRING "Toggle Unicast peer mode")
 set(Z_FEATURE_AUTO_RECONNECT 1 CACHE STRING "Toggle automatic reconnection")
 set(Z_FEATURE_MULTICAST_DECLARATIONS 0 CACHE STRING "Toggle multicast resource declarations")
+set(Z_FEATURE_MULTICAST_LOOPBACK 1 CACHE STRING "Deliver own multicast datagrams to sockets on this host (0 sets IP_MULTICAST_LOOP off)")
 set(Z_FEATURE_LOCAL_QUERYABLE 0 CACHE STRING "Toggle local queriables")
 set(Z_FEATURE_ADMIN_SPACE 0 CACHE STRING "Toggle admin space support")
 

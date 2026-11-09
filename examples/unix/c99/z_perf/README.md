@@ -35,10 +35,18 @@ brightonz.foundation의 z_perf 예제와 같은 측정이다. 탐색·판정 코
 저장소 최상위에서:
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBATCH_MULTICAST_SIZE=1450 -DBATCH_UNICAST_SIZE=1450 -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DZ_FEATURE_MULTI_THREAD=1 -DZ_FEATURE_MULTICAST_DECLARATIONS=1 -DZ_FEATURE_MULTICAST_LOOPBACK=0 -DBATCH_MULTICAST_SIZE=1450 -DBATCH_UNICAST_SIZE=1450 -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF
 cmake --build build --target z_perf_tester z_perf_peer z_perf_tcp_tester z_perf_tcp_peer
 ```
 
+- `Z_FEATURE_MULTICAST_DECLARATIONS=1`: multicast에서도 key를 번호로 선언하고 메시지에 번호만 싣는다.
+  기본값 0이면 메시지마다 key 문자열 전체가 실려(128 B 메시지가 153.8 B, 1450 B 데이터그램에 9개) brightonz.foundation 예제
+  (고정 Key ID, 135.7 B, 10개)와 조건이 달라진다. TCP는 이 값과 상관없이 늘 번호를 쓴다.
+- `Z_FEATURE_MULTICAST_LOOPBACK=0`: 내가 보낸 multicast 데이터그램을 이 PC로 되돌리지 않는다 (송신 소켓의 `IP_MULTICAST_LOOP` 끔).
+  기본값 1이면 보내는 쪽이 자기 데이터그램을 모두 다시 받아 처리한 뒤 버리므로 그만큼 CPU를 쓴다.
+  brightonz.foundation 예제는 `loopback: false`로 같은 설정을 쓴다.
+  끄면 같은 PC 안의 다른 프로세스도 이 데이터그램을 받지 못하므로, 두 PC로 잴 때만 쓴다.
+- 두 값은 multicast 실행 첫 줄(`MULTICAST_DECLARATIONS=1 MULTICAST_LOOPBACK=0`)에 남는다.
 - `BATCH_MULTICAST_SIZE=1450`: UDP 데이터그램 최대 크기. brightonz.foundation 예제의 mtu·batch.length와 같다.
   기본값 2048은 이더넷 MTU(1500)보다 커서 IP 단편화가 생긴다. multicast는 batch 크기를 협상하지 않으므로 두 PC가 같아야 한다.
 - `BATCH_UNICAST_SIZE=1450`: TCP에서 batch 하나의 최대 크기. multicast와 같은 크기로 맞춰, 전송 방식만 바꾼 비교가 되게 한다.
@@ -53,7 +61,7 @@ MT1의 `build`와 따로 `build_mt0`에 빌드한다. multicast만 잴 수 있�
 (1.6.1은 MT0에서 unicast peer를 끄므로 TCP 직접 연결이 없다. `z_perf_tcp_*`는 안내만 출력하고 끝난다).
 
 ```sh
-cmake -S . -B build_mt0 -DCMAKE_BUILD_TYPE=Release -DZ_FEATURE_MULTI_THREAD=0 -DZ_CONFIG_SOCKET_TIMEOUT=1 -DBATCH_MULTICAST_SIZE=1450 -DBATCH_UNICAST_SIZE=1450 -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF
+cmake -S . -B build_mt0 -DCMAKE_BUILD_TYPE=Release -DZ_FEATURE_MULTI_THREAD=0 -DZ_CONFIG_SOCKET_TIMEOUT=1 -DZ_FEATURE_MULTICAST_DECLARATIONS=1 -DZ_FEATURE_MULTICAST_LOOPBACK=0 -DBATCH_MULTICAST_SIZE=1450 -DBATCH_UNICAST_SIZE=1450 -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF
 cmake --build build_mt0 --target z_perf_tester z_perf_peer
 ```
 
