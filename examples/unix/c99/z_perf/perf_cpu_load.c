@@ -9,28 +9,31 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
-/* /proc/stat에서 mask에 든 CPU들의 일한 jiffies와 전체 jiffies를 더한다 */
-static bool perf_cpu_read(uint64_t mask, uint64_t* busy, uint64_t* total) {
+static uint64_t perf_cpu_now_ns(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return ((uint64_t)now.tv_sec * 1000000000u) + (uint64_t)now.tv_nsec;
+}
+
+/* /proc/stat에서 mask에 든 CPU들의 쉰 시간(idle + iowait)을 더한다 */
+static bool perf_cpu_read_idle(uint64_t mask, uint64_t* idle) {
     FILE* file = fopen("/proc/stat", "r");
     if (file == NULL) return false;
     char line[512];
     bool is_found = false;
-    *busy = 0u;
-    *total = 0u;
+    *idle = 0u;
     while (fgets(line, sizeof(line), file) != NULL) {
-        /* "cpuN user nice system idle iowait irq softirq steal ..." 줄만 본다 ("cpu " 합계 줄은 건너뛴다) */
+        /* "cpuN user nice system idle iowait ..." 줄만 본다 ("cpu " 합계 줄은 건너뛴다) */
         if ((strncmp(line, "cpu", 3) != 0) || (line[3] < '0') || (line[3] > '9')) continue;
         char* p = &line[3];
         const unsigned long index = strtoul(p, &p, 10);
         if ((index >= 64u) || ((mask & ((uint64_t)1u << index)) == 0u)) continue;
-        uint64_t fields[8] = {0u};
-        for (int i = 0; i < 8; i++) fields[i] = strtoull(p, &p, 10);
-        const uint64_t idle = fields[3] + fields[4]; /* idle + iowait */
-        const uint64_t all =
-            fields[0] + fields[1] + fields[2] + fields[3] + fields[4] + fields[5] + fields[6] + fields[7];
-        *busy += all - idle;
-        *total += all;
+        uint64_t fields[5] = {0u};
+        for (int i = 0; i < 5; i++) fields[i] = strtoull(p, &p, 10);
+        *idle += fields[3] + fields[4];
         is_found = true;
     }
     fclose(file);
@@ -45,34 +48,41 @@ void perf_cpu_load_open(perf_cpu_load_t* cpu) {
     cpu_set_t set;
     CPU_ZERO(&set);
     if (sched_getaffinity(0, sizeof(set), &set) != 0) return;
-    unsigned count = 0u;
     int only = -1;
     for (int i = 0; i < 64; i++) {
         if (CPU_ISSET(i, &set)) {
             cpu->cpu_mask |= (uint64_t)1u << i;
             only = i;
-            count++;
+            cpu->cpu_count++;
         }
     }
-    if (count == 0u) return;
-    if (count == 1u) {
+    if (cpu->cpu_count == 0u) return;
+    if (cpu->cpu_count == 1u) {
         snprintf(cpu->label, sizeof(cpu->label), "CPU%d", only);
     } else {
-        snprintf(cpu->label, sizeof(cpu->label), "CPU %u개 합계", count);
+        snprintf(cpu->label, sizeof(cpu->label), "CPU %u개 합계", cpu->cpu_count);
     }
-    cpu->is_available = perf_cpu_read(cpu->cpu_mask, &cpu->previous_busy, &cpu->previous_total);
+    cpu->ticks_per_s = sysconf(_SC_CLK_TCK);
+    if (cpu->ticks_per_s <= 0) cpu->ticks_per_s = 100;
+    cpu->is_available = perf_cpu_read_idle(cpu->cpu_mask, &cpu->previous_idle);
+    cpu->previous_at_ns = perf_cpu_now_ns();
 }
 
 void perf_cpu_load_sample_tick(perf_cpu_load_t* cpu) {
     if (!cpu->is_available) return;
-    uint64_t busy;
-    uint64_t total;
-    if (!perf_cpu_read(cpu->cpu_mask, &busy, &total)) return;
-    const uint64_t d_busy = busy - cpu->previous_busy;
-    const uint64_t d_total = total - cpu->previous_total;
-    cpu->previous_busy = busy;
-    cpu->previous_total = total;
-    const double load_pct = (d_total == 0u) ? 0.0 : 100.0 * (double)d_busy / (double)d_total;
+    uint64_t idle;
+    if (!perf_cpu_read_idle(cpu->cpu_mask, &idle)) return;
+    const uint64_t at_ns = perf_cpu_now_ns();
+    /* 그동안 CPU들이 가진 시간 (/proc/stat 단위) = 지난 실제 시간 × 단위 × CPU 수 */
+    const double d_all =
+        ((double)(at_ns - cpu->previous_at_ns) / 1e9) * (double)cpu->ticks_per_s * (double)cpu->cpu_count;
+    const double d_idle = (double)idle - (double)cpu->previous_idle;
+    cpu->previous_idle = idle;
+    cpu->previous_at_ns = at_ns;
+    double load_pct = (d_all <= 0.0) ? 0.0 : 100.0 * (1.0 - (d_idle / d_all));
+    /* 두 값을 읽는 순간이 조금 어긋나 범위를 살짝 넘을 수 있다 */
+    if (load_pct < 0.0) load_pct = 0.0;
+    if (load_pct > 100.0) load_pct = 100.0;
 
     pthread_mutex_lock(&cpu->lock);
     if (cpu->sample_count < PERF_CPU_SAMPLES_MAX) cpu->samples[cpu->sample_count++] = load_pct;
