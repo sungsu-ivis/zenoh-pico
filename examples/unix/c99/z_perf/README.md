@@ -93,6 +93,9 @@ cd ~/workspace/zenoh-pico && ./build/examples/z_perf/test_start.sh tester ~/zper
 - 측정 전에 모든 CPU의 주파수 정책을 `performance`, 터보를 끔으로 맞춘다 (`CPU_GOVERNOR`, `TURBO`).
   sudo 비밀번호를 물을 수 있고, 맞추지 못하면 측정하지 않는다. 측정이 끝나도 되돌리지 않는다 (재부팅하면 원래대로).
 - 측정 조건(커널, CPU, CPU 고정, 클럭 정책, 터보, NIC 속도·MTU·IP·드라이버)과 회차별 UDP 카운터 증가분을 로그와 요약에 남긴다.
+- 두 프로그램 모두 자기가 도는 코어(CPU 3)의 부하율을 1초마다 재고, 10초마다 평균·최소·최대·표준편차를 한 줄 출력한다
+  (`perf_cpu_load.h`). 예: `[a  20s] CPU3 부하 11~20초 (1초 샘플 10개): 평균  74.1%  최소  41.2%  최대  98.9%  표준편차 16.3%`.
+  `/proc/stat`의 그 코어 jiffies로 계산하므로 그 코어에서 돈 모든 것이 들어간다. MT0는 쉬지 않고 도는 구조라 늘 100%다.
   두 PC의 로그 첫 줄이 `CPU 고정 …=3 | 클럭 정책 performance | 터보 끔`인지 확인한다.
 - `test_start.sh`를 고쳤거나 받은 뒤에는 `cmake --build build --target z_perf_tester z_perf_peer`를 다시 해야
   `build/examples/z_perf/test_start.sh`(빌드 때 복사한 사본)에 반영된다.
