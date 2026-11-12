@@ -66,6 +66,35 @@ void perf_cpu_load_open(perf_cpu_load_t* cpu) {
     if (cpu->ticks_per_s <= 0) cpu->ticks_per_s = 100;
     cpu->is_available = perf_cpu_read_idle(cpu->cpu_mask, &cpu->previous_idle);
     cpu->previous_at_ns = perf_cpu_now_ns();
+    cpu->base_idle = cpu->previous_idle;
+    cpu->base_at_ns = cpu->previous_at_ns;
+}
+
+perf_cpu_usage_t perf_cpu_load_usage(const perf_cpu_load_t* cpu) {
+    perf_cpu_usage_t usage = {0u, 0u};
+    uint64_t idle;
+    if (!cpu->is_available || !perf_cpu_read_idle(cpu->cpu_mask, &idle)) return usage;
+    const double elapsed_ms = (double)(perf_cpu_now_ns() - cpu->base_at_ns) / 1e6;
+    /* 쉰 시간 (ms, CPU 하나 기준) */
+    const double idle_ms = (idle <= cpu->base_idle) ? 0.0
+                                                    : (double)(idle - cpu->base_idle) * 1000.0 /
+                                                          ((double)cpu->ticks_per_s * (double)cpu->cpu_count);
+    double busy_ms = elapsed_ms - idle_ms;
+    if (busy_ms < 0.0) busy_ms = 0.0;
+    usage.elapsed_ms = (elapsed_ms < 1.0) ? 1u : (uint32_t)elapsed_ms;
+    usage.busy_ms = (uint32_t)(busy_ms + 0.5);
+    if (usage.busy_ms > usage.elapsed_ms) usage.busy_ms = usage.elapsed_ms;
+    return usage;
+}
+
+double perf_cpu_usage_load_pct(perf_cpu_usage_t from, perf_cpu_usage_t to) {
+    if ((from.elapsed_ms == 0u) || (to.elapsed_ms == 0u)) return -1.0;
+    const uint32_t d_elapsed = to.elapsed_ms - from.elapsed_ms;
+    if (d_elapsed == 0u) return -1.0;
+    /* /proc/stat의 쉰 시간은 10 ms 단위라 짧은 구간에서는 일한 시간이 거꾸로 갈 수 있다 */
+    const uint32_t d_busy = (to.busy_ms > from.busy_ms) ? to.busy_ms - from.busy_ms : 0u;
+    const double load_pct = 100.0 * (double)d_busy / (double)d_elapsed;
+    return (load_pct > 100.0) ? 100.0 : load_pct;
 }
 
 void perf_cpu_load_sample_tick(perf_cpu_load_t* cpu) {

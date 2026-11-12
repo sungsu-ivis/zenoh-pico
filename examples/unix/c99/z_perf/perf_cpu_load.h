@@ -13,6 +13,9 @@
  *   - 1초 태스크 : 샘플 하나를 잰다 (직전 샘플 이후의 부하율).
  *   - 10초 태스크: 그동안 모인 샘플(보통 10개)의 평균·최소·최대·표준편차를 한 줄 출력하고 비운다.
  *   - 끝날 때 남은 샘플이 있으면 마지막으로 한 번 더 출력한다.
+ *   - 누적 값: 시작한 뒤 그 코어가 일한 시간과 지난 시간 (ms). 두 시점의 값 차이로 아무 구간의 평균 부하를 낸다.
+ *     받는 쪽은 이 값을 status에 실어 보내고, 보내는 쪽은 결과를 낸 확인 단계의 시작과 끝 값으로
+ *     두 PC의 그 15초 평균 부하를 결과에 출력한다 (perf_measure.c).
  * 시각표: 시작할 때 기준값을 읽고, 첫 샘플은 다음 1초 경계(1초 출력 [a 1s]와 같은 순간)에 잰다.
  * 그래서 샘플 k는 1초 출력 [a ks]와 같은 구간이고, 통계 줄은 10초 경계보다 0.5초 늦게 나온다.
  */
@@ -37,6 +40,8 @@ typedef struct {
     long ticks_per_s;        /* /proc/stat 값의 단위 (USER_HZ, 보통 100) */
     uint64_t previous_idle;  /* 1초 태스크 전용: 직전 샘플 때까지 쉰 시간 (/proc/stat 단위) */
     uint64_t previous_at_ns; /* 1초 태스크 전용: 직전 샘플 시각 (CLOCK_MONOTONIC) */
+    uint64_t base_idle;      /* 누적 값의 기준: 시작할 때까지 쉰 시간 (/proc/stat 단위) */
+    uint64_t base_at_ns;     /* 누적 값의 기준: 시작한 시각 (CLOCK_MONOTONIC) */
 
     /* lock: 1초 태스크가 넣고 10초 태스크가 꺼내는 샘플 */
     pthread_mutex_t lock;
@@ -44,6 +49,12 @@ typedef struct {
     uint32_t sample_count;                /* samples에 든 개수 */
     uint32_t taken;                       /* 지금까지 잰 샘플 수 (= 샘플을 잰 초) */
 } perf_cpu_load_t;
+
+/* 시작한 뒤의 누적 CPU 시간. 두 시점의 차이로 그 구간의 평균 부하를 낸다 */
+typedef struct {
+    uint32_t busy_ms;    /* 일한 시간 (ms). CPU가 여럿이면 CPU 하나 기준으로 나눈 값 */
+    uint32_t elapsed_ms; /* 지난 실제 시간 (ms). 0이면 재지 못한 값 */
+} perf_cpu_usage_t;
 
 /* 잴 CPU를 정하고(이 스레드의 affinity) 기준값을 읽는다. 읽을 수 없으면 is_available = false. */
 void perf_cpu_load_open(perf_cpu_load_t* cpu);
@@ -53,5 +64,11 @@ void perf_cpu_load_sample_tick(perf_cpu_load_t* cpu);
 
 /* 10초 태스크: 모인 샘플의 통계를 한 줄 출력하고 비운다. is_final이면 끝날 때 남은 샘플을 출력한다. */
 void perf_cpu_load_report_tick(perf_cpu_load_t* cpu, const char* my_name, bool is_final);
+
+/* 지금의 누적 CPU 시간을 읽는다. 재지 못하면 두 값 모두 0. open 때 정한 값만 읽으므로 어느 스레드에서 불러도 된다. */
+perf_cpu_usage_t perf_cpu_load_usage(const perf_cpu_load_t* cpu);
+
+/* 두 시점 사이의 평균 부하 (%, 0~100). 어느 쪽이든 재지 못했거나 구간이 없으면 음수. */
+double perf_cpu_usage_load_pct(perf_cpu_usage_t from, perf_cpu_usage_t to);
 
 #endif /* PERF_CPU_LOAD_H */

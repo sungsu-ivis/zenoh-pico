@@ -36,7 +36,12 @@
  *
  * 피드백 메시지 (0.25초마다, 측정 대상 아님. 처리량·지터는 1초 구간 값)
  *   count  (4 B)  : 보내는 쪽 → 받는 쪽. [지금까지 보낸 마지막 seq]
- *   status (68 B) : 받는 쪽 → 보내는 쪽. [수신 결과 perf_stream_report_t] (처리량·지터·손실률·집계 기준 seq)
+ *   status (76 B) : 받는 쪽 → 보내는 쪽. [수신 결과 perf_stream_report_t] (처리량·지터·손실률·집계 기준 seq,
+ *                   받는 쪽의 누적 CPU 시간)
+ *
+ * CPU 부하 (결과에 출력): 결과를 낸 확인 단계 15초 동안 두 PC 각각에서 프로그램을 묶은 코어 하나의 평균 부하.
+ *   보내는 쪽은 확인 단계를 시작할 때와 끝낼 때 자기 누적 CPU 시간과, 그때 갖고 있던 가장 최근 status의
+ *   받는 쪽 누적 CPU 시간을 잡아 둘의 차이로 계산한다 (perf_cpu_load.h).
  *
  * 스레드 (라이브러리를 Z_FEATURE_MULTI_THREAD=1로 빌드했을 때)
  *   - 스케줄러   : 1 ms마다 깨어나 목표 송신량만큼 메시지를 보내고, 0.25초마다 count도 보낸다.
@@ -77,7 +82,7 @@
 #define PERF_PAYLOAD_BYTES 128 /* 데이터 메시지 전체 크기 */
 #define PERF_HEADER_BYTES 12   /* 그중 측정용 헤더 크기: seq 4 + 송신 시각 8 */
 #define PERF_COUNT_BYTES 4     /* count 메시지 크기 */
-#define PERF_STATUS_BYTES 68   /* status 메시지 크기 (perf_stream_report_t를 순서대로 담은 것) */
+#define PERF_STATUS_BYTES 76   /* status 메시지 크기 (perf_stream_report_t를 순서대로 담은 것) */
 
 /* 스레드 사이에 나누는 값. GCC/Clang의 __atomic 내장 함수로 읽고 쓴다 (perf_measure.c) */
 typedef struct {
@@ -112,7 +117,19 @@ typedef struct {
     uint32_t jitter_max_abs_us;       /* 직전 1초: |D| 최댓값 */
     uint32_t counted_seq;             /* 집계 기준 seq: 미수신 계산에 쓴 상대 count의 마지막 seq.
                                          보내는 쪽은 이 값으로 자기 메시지가 어디까지 반영됐는지 안다 */
+    perf_cpu_usage_t cpu;             /* status를 보낸 순간 받는 쪽의 누적 CPU 시간 */
 } perf_stream_report_t;
+
+/* 확인 단계의 CPU 부하 (보내는 쪽 TX 피드백 스레드만 쓰고, 끝난 뒤 main이 읽는다) */
+typedef struct {
+    perf_cpu_usage_t start_mine; /* 확인 단계를 시작할 때 내 누적 CPU 시간 */
+    perf_cpu_usage_t start_peer; /* 그때 갖고 있던 가장 최근 status의 받는 쪽 누적 CPU 시간 */
+    bool has_value;              /* 끝난 확인 단계의 값이 있는가 */
+    uint32_t try_no;             /* 그 값이 몇 번째 확인 단계의 것인가 */
+    uint32_t actual_rate;        /* 그 확인 단계의 실제 송신량 (msg/s) */
+    double mine_pct;             /* 보내는 쪽 평균 부하 (%). 음수 = 재지 못함 */
+    double peer_pct;             /* 받는 쪽 평균 부하 (%). 음수 = 재지 못함 */
+} perf_confirm_cpu_t;
 
 /* num0 송신 상태.
  * 쓰는 것은 스케줄러 스레드 하나뿐이다. 다른 스레드(TX 피드백, main)가 읽는 카운터만 atomic으로 둔다. */
@@ -190,7 +207,8 @@ typedef struct {
     uint32_t print_seconds; /* TX 피드백: 1초 출력 번호 ([a Ns]의 N). 1초 경계를 지난 횟수 */
     uint32_t feedback_ticks; /* TX 피드백: tick 번호. 1초에 한 번(1초 경계) 구간을 마감하고 출력한다 */
 
-    perf_cpu_load_t cpu_load; /* CPU 부하: 1초 샘플, 10초 통계 */
+    perf_cpu_load_t cpu_load;       /* CPU 부하: 1초 샘플, 10초 통계 */
+    perf_confirm_cpu_t confirm_cpu; /* 보내는 쪽: 확인 단계 15초의 두 PC CPU 부하 */
 
     perf_atomic_bool_t is_ready; /* 콜백이 상태를 써도 되는가 */
     perf_atomic_bool_t should_stop_publish;
