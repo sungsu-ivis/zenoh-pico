@@ -93,6 +93,9 @@ cd ~/workspace/zenoh-pico && ./build/examples/z_perf/test_start.sh tester ~/zper
 - 측정 전에 모든 CPU의 주파수 정책을 `performance`, 터보를 끔으로 맞춘다 (`CPU_GOVERNOR`, `TURBO`).
   sudo 비밀번호를 물을 수 있고, 맞추지 못하면 측정하지 않는다. 측정이 끝나도 되돌리지 않는다 (재부팅하면 원래대로).
 - 측정 조건(커널, CPU, CPU 고정, 클럭 정책, 터보, NIC 속도·MTU·IP·드라이버)과 회차별 UDP 카운터 증가분을 로그와 요약에 남긴다.
+- 받는 쪽은 앞 seq보다 작거나 같은 seq(순서 바뀜·중복)를 받은 수에 넣지 않는다. 넣으면 빠진 메시지를 가린다
+  (1, 3, 3, 4를 받으면 2가 빠졌는데 4개를 받은 것이 된다). 일어나면 보내는 쪽 결과에 건수가 나온다.
+- count는 실제 시간 0.25초마다 보낸다. 송신이 느려 1 ms tick이 길어져도 받는 쪽이 count가 끊겼다고 보고 끝나지 않는다.
   두 PC의 로그 첫 줄이 `CPU 고정 …=3 | 클럭 정책 performance | 터보 끔`인지 확인한다.
 - `test_start.sh`를 고쳤거나 받은 뒤에는 `cmake --build build --target z_perf_tester z_perf_peer`를 다시 해야
   `build/examples/z_perf/test_start.sh`(빌드 때 복사한 사본)에 반영된다.

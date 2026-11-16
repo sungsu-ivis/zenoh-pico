@@ -176,22 +176,38 @@ static void perf_send_count(perf_node_t* node) {
     (void)perf_put(&node->count_publisher, message, sizeof(message));
 }
 
-/* 스케줄러 tick 한 번 (1 ms). tick_ms는 0부터 1씩 는다.
+/* count를 보낼 때가 됐으면 보낸다 (실제 시간 0.25초마다). tick 수로 세면 PUT이 느려 tick이 길어질 때 count 간격도
+ * 길어져, 받는 쪽이 count가 5초 끊긴 것을 보고 측정 중에 끝나 버릴 수 있다. 스케줄러만 부른다. */
+static void perf_send_count_if_due(perf_node_t* node) {
+    const uint64_t period_us = (uint64_t)PERF_FEEDBACK_PERIOD_MS * 1000u;
+    const uint64_t now = perf_now_us();
+    perf_tx_stream_t* tx = &node->tx;
+    if (tx->next_count_us == 0u) tx->next_count_us = now + period_us;
+    if (now < tx->next_count_us) return;
+    perf_send_count(node);
+    tx->next_count_us += period_us;
+    if (tx->next_count_us <= now) tx->next_count_us = now + period_us; /* 많이 밀렸으면 몰아서 보내지 않는다 */
+}
+
+/* 스케줄러 tick 한 번 (1 ms).
  * rate_credit은 1 ms마다 목표 송신량만큼 쌓고, 1000이 모일 때마다 1개 보낸다. */
-static void perf_scheduler_tick(perf_node_t* node, uint64_t tick_ms, uint64_t* rate_credit) {
+static void perf_scheduler_tick(perf_node_t* node, uint64_t* rate_credit) {
     /* 목표 송신량(msg/s)을 1 ms마다 rate/1000개씩 나눠 보낸다 (예: 30000 msg/s → 1 ms마다 30개).
      * 보내는 데 1 ms보다 오래 걸리면 다음 tick이 늦어져, 송신 측이 낼 수 있는 최대 속도로 보내게 된다. */
     const uint32_t rate = perf_target_rate_get(node);
     *rate_credit = (rate == 0u) ? 0u : *rate_credit + rate;
+    uint32_t sent_in_tick = 0u;
     while (*rate_credit >= 1000u) {
         perf_send_message(node);
         *rate_credit -= 1000u;
+        /* PUT이 느려 tick 하나가 길어져도 count가 끊기지 않게 64개마다 시각을 본다 */
+        if ((++sent_in_tick % 64u) == 0u) perf_send_count_if_due(node);
     }
     /* 이번 tick에 batch에 남은 메시지를 내보낸다. 메시지가 batch에서 기다리는 시간은 1 ms를 넘지 않는다. */
     if (rate != 0u) perf_flush_batch(node);
 
     /* 0.25초마다: 방금까지 보낸 데이터의 count를 보낸다 (탐색 중 쉬는 동안에도 보낸다) */
-    if ((tick_ms > 0u) && (tick_ms % PERF_FEEDBACK_PERIOD_MS == 0u)) perf_send_count(node);
+    perf_send_count_if_due(node);
 }
 
 #if Z_FEATURE_MULTI_THREAD == 1
@@ -199,16 +215,14 @@ static void* perf_scheduler_main(void* arg) {
     perf_node_t* node = (perf_node_t*)arg;
     struct timespec next;
     clock_gettime(CLOCK_MONOTONIC, &next);
-    uint64_t tick_ms = 0u;
     uint64_t rate_credit = 0u;
 
     while (!perf_flag_get(&node->should_stop_publish)) {
-        perf_scheduler_tick(node, tick_ms, &rate_credit);
+        perf_scheduler_tick(node, &rate_credit);
 
         /* 다음 깨어날 시각 = 이전 목표 + 1 ms ("지금 + 1 ms"로 하면 처리 시간만큼 밀린다) */
         perf_timespec_add_ms(&next, 1);
         perf_sleep_until(&next);
-        tick_ms++;
     }
 
     /* 멈추기 직전 마지막 count: 받는 쪽이 drain 동안 최종 미수신율을 정할 수 있게 */
@@ -271,7 +285,12 @@ static void perf_on_message(z_loaned_sample_t* sample, void* context) {
         rx->previous_tx_us = tx_us;
         rx->previous_rx_us = rx_us;
     } else {
-        rx->out_of_order++; /* 앞 seq보다 작거나 같다: 순서 바뀜 또는 중복 */
+        /* 앞 seq보다 작거나 같다: 순서 바뀜 또는 중복. 받은 수에 더하면 빠진 메시지를 가리므로
+         * (예: 1, 3, 3, 4를 받으면 2가 빠졌는데 4개를 받은 것이 된다) 손실 계산에서는 받지 않은 것으로 센다.
+         * reliable 채널에서는 원래 일어나지 않는다. 보내는 쪽 결과에 건수를 따로 적는다. */
+        rx->out_of_order++;
+        pthread_mutex_unlock(&node->state_lock);
+        return;
     }
 
     rx->received++;
@@ -684,7 +703,6 @@ static void perf_run_single_thread(perf_node_t* node, volatile sig_atomic_t* is_
     const uint64_t feedback_period_us = (uint64_t)PERF_FEEDBACK_PERIOD_MS * 1000u;
     uint64_t now = perf_now_us();
     uint64_t next_schedule_us = now;
-    uint64_t tick_ms = 0u;
     uint64_t rate_credit = 0u;
     uint64_t next_tx_feedback_us = (now / 1000000u + 1u) * 1000000u; /* 다음 1초 경계 */
     uint64_t next_rx_feedback_us = next_tx_feedback_us + feedback_period_us / 2u;
@@ -698,7 +716,7 @@ static void perf_run_single_thread(perf_node_t* node, volatile sig_atomic_t* is_
         /* zp_spin_once가 받을 것 없이 기다리면 그동안의 tick이 밀린다 (소켓 timeout은 커널 tick 단위로 올라가 1 ms보다 길다).
          * 밀린 tick은 여기서 이어서 돌아 평균 송신량을 목표에 맞춘다 */
         while (is_publishing && (now >= next_schedule_us)) {
-            perf_scheduler_tick(node, tick_ms++, &rate_credit);
+            perf_scheduler_tick(node, &rate_credit);
             next_schedule_us += 1000u; /* 이전 목표 + 1 ms */
         }
         if (now >= next_tx_feedback_us) {
@@ -771,7 +789,15 @@ int perf_run(perf_node_t* node, const z_owned_session_t* session, const char* my
     perf_flag_set(&node->is_ready, false);
 
     perf_print_summary(node);
-    if (options->is_publisher) perf_search_print_result(&node->search, my_name, peer_name);
+    if (options->is_publisher) {
+        perf_search_print_result(&node->search, my_name, peer_name);
+        if (node->has_peer_view && (node->peer_view.out_of_order != 0u)) {
+            printf(
+                "  참고        : 받는 쪽에서 순서가 바뀌었거나 중복된 메시지 %u개 (미수신 계산에서는 받지 않은 것으로 "
+                "셈)\n",
+                node->peer_view.out_of_order);
+        }
+    }
     perf_node_close(node);
     return 0;
 }

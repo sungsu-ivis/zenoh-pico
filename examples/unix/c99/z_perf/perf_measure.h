@@ -39,7 +39,7 @@
  *   status (68 B) : 받는 쪽 → 보내는 쪽. [수신 결과 perf_stream_report_t] (처리량·지터·손실률·집계 기준 seq)
  *
  * 스레드 (라이브러리를 Z_FEATURE_MULTI_THREAD=1로 빌드했을 때)
- *   - 스케줄러   : 1 ms마다 깨어나 목표 송신량만큼 메시지를 보내고, 0.25초마다 count도 보낸다.
+ *   - 스케줄러   : 1 ms마다 깨어나 목표 송신량만큼 메시지를 보내고, 실제 시간 0.25초마다 count도 보낸다.
  *                  (데이터와 count를 한 스레드가 보내므로 순서가 저절로 지켜져 송신 쪽에는 락이 없다)
  *   - TX 피드백  : 0.25초마다 status를 보내고 탐색을 한 단계 진행한다. 1초마다 수신 구간을 마감하고 한 줄 출력한다.
  *   - RX 피드백  : 0.25초마다 받은 count로 미수신율을 계산하고, 받은 status를 저장한다.
@@ -94,10 +94,10 @@ typedef struct {
 
 /* num0 수신 결과. 받는 쪽이 계산해서 status로 보내는 단위다. */
 typedef struct {
-    uint32_t received;                /* 누적 수신 수 */
+    uint32_t received;                /* 누적 수신 수 (순서 바뀜·중복 제외) */
     uint32_t interval_received;       /* 직전 1초 수신 수 */
     uint32_t sequence_gaps;           /* 누적: seq가 건너뛴 개수 (누락 후보) */
-    uint32_t out_of_order;            /* 누적: 앞 seq보다 작거나 같은 seq가 온 횟수 */
+    uint32_t out_of_order;            /* 누적: 앞 seq 이하가 온 횟수 (수신 수에서 뺌) */
     uint32_t unreceived;              /* 누적 미수신 수 (상대 count 기준) */
     uint32_t unreceived_ppm;          /* 누적 미수신율 (ppm, 1% = 10000) */
     uint32_t interval_unreceived_ppm; /* 직전 count 대비 순간 미수신율 (ppm) */
@@ -120,6 +120,7 @@ typedef struct {
     perf_atomic_u32_t published;    /* put 성공 수 (= 마지막으로 보낸 seq) */
     perf_atomic_u32_t failed;       /* put 실패 수 */
     uint32_t last_second_published; /* TX 피드백 전용: 직전 출력 시점의 published */
+    uint64_t next_count_us;         /* 스케줄러 전용: 다음 count 시각 (0 = 미정) */
 } perf_tx_stream_t;
 
 /* num0 수신 상태 (state_lock으로 보호) */
