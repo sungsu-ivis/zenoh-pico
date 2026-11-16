@@ -324,6 +324,7 @@ result_of() {
     state="확인 실패"
     grep -q '^  확인 *: 목표 .*허용 미수신율 이내 (' "$log" && state="확인 통과"
     grep -q '탐색이 끝나기 전에 멈춰' "$log" && state="중단됨"
+    grep -q '상대 보고가 끊겨' "$log" && state="중단됨 (상대 보고 끊김)"
     echo "${value}|${state}"
 }
 
@@ -356,7 +357,8 @@ for run in $(seq 1 "$RUNS"); do
     if [ "$stop_requested" -eq 1 ]; then
         state="중단됨"
     elif [ "$run_ok" -eq 0 ]; then
-        state="실행 오류 (로그 확인)"
+        # 프로그램이 스스로 중단한 회차(상대 보고 끊김 등)는 그 상태를 그대로 둔다
+        [ "${state#중단됨}" = "$state" ] && state="실행 오류 (로그 확인)"
         failed_runs=$((failed_runs + 1))
     fi
     if [ "$ROLE" = "tester" ]; then
@@ -366,7 +368,7 @@ for run in $(seq 1 "$RUNS"); do
     fi
     lines+=("$(udp_delta_text "$udp_before" "$udp_after")")
     # 중단·실행 오류 회차는 중앙값에서 뺀다
-    [ "$stop_requested" -eq 0 ] && [ "$run_ok" -eq 1 ] && done_runs+=("${value} ${run}")
+    [ "$stop_requested" -eq 0 ] && [ "$run_ok" -eq 1 ] && [ "${state#중단됨}" = "$state" ] && done_runs+=("${value} ${run}")
     if [ "$ROLE" = "tester" ] && [ "$run" -lt "$RUNS" ] && [ "$stop_requested" -eq 0 ]; then
         echo "다음 회차까지 ${RUN_GAP_S}초 쉽니다 (받는 쪽이 다시 뜰 시간)."
         sleep "$RUN_GAP_S"

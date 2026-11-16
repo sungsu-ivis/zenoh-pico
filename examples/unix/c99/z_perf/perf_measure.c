@@ -13,6 +13,9 @@
 #define PERF_FEEDBACK_PERIOD_MS 250u /* count·status를 주고받고 탐색을 판정하는 주기 */
 #define PERF_TICKS_PER_SECOND (1000u / PERF_FEEDBACK_PERIOD_MS) /* 1초의 피드백 tick 수 */
 #define PERF_PEER_IDLE_STOP_US (5u * 1000000u) /* 받는 쪽: count가 이만큼 끊기면 상대가 끝난 것 */
+/* 받는 쪽: 시작한 뒤 이만큼 count가 한 번도 오지 않으면 기다리기를 멈춘다 (짝이 어긋난 회차가 끝나지 않는 것을 막는다)
+ */
+#define PERF_PEER_FIRST_COUNT_TIMEOUT_US (120u * 1000000u)
 #define PERF_USER_BYTES (PERF_PAYLOAD_BYTES - PERF_HEADER_BYTES)
 
 /* ===================================================================
@@ -321,11 +324,15 @@ static void perf_on_status(z_loaned_sample_t* sample, void* context) {
     perf_node_t* node = (perf_node_t*)context;
     if ((node == NULL) || (sample == NULL) || !perf_flag_get(&node->is_ready)) return;
     uint8_t data[PERF_STATUS_BYTES];
-    if (perf_read_payload(sample, data, sizeof(data)) != sizeof(data)) return; /* 크기가 다르면 버린다 */
+    const size_t length = perf_read_payload(sample, data, sizeof(data));
 
     pthread_mutex_lock(&node->state_lock);
-    memcpy(node->status_mail, data, sizeof(data));
-    node->has_status_mail = true;
+    if (length == sizeof(data)) {
+        memcpy(node->status_mail, data, sizeof(data));
+        node->has_status_mail = true;
+    } else {
+        node->wrong_status_bytes = length; /* 크기가 다르면 버린다. 보내는 쪽 TX 피드백이 한 번 알린다 */
+    }
     pthread_mutex_unlock(&node->state_lock);
 }
 
@@ -358,7 +365,7 @@ static void perf_rx_close_interval(perf_rx_stream_t* rx, uint64_t interval_us) {
 }
 
 /* report → status 메시지 (PERF_STATUS_BYTES = 68 B) */
-static void perf_put_report(uint8_t* p, const perf_stream_report_t* r) {
+static uint8_t* perf_put_report(uint8_t* p, const perf_stream_report_t* r) {
     p = perf_put_u32(p, r->received);
     p = perf_put_u32(p, r->interval_received);
     p = perf_put_u32(p, r->sequence_gaps);
@@ -372,7 +379,7 @@ static void perf_put_report(uint8_t* p, const perf_stream_report_t* r) {
     p = perf_put_f64(p, r->jitter_mean_us);
     p = perf_put_f64(p, r->jitter_variance_us2);
     p = perf_put_u32(p, r->jitter_max_abs_us);
-    (void)perf_put_u32(p, r->counted_seq);
+    return perf_put_u32(p, r->counted_seq); /* 끝 위치: node_open이 크기를 확인한다 */
 }
 
 /* status 메시지 → report */
@@ -414,13 +421,31 @@ static void perf_tx_feedback_tick(perf_node_t* node) {
     const perf_stream_report_t mine = node->rx.report;
     const perf_stream_report_t peer = node->peer_view;
     const bool has_peer_view = node->has_peer_view;
+    const bool is_sender_restarted = node->is_sender_restarted;
+    const uint32_t foreign_status = node->foreign_status;
+    const size_t wrong_status_bytes = node->wrong_status_bytes;
     pthread_mutex_unlock(&node->state_lock);
 
-    /* (3) 받는 쪽: status = [내 수신 결과] */
-    if (!node->options.is_publisher) {
+    /* (3) 받는 쪽: status = [내 수신 결과]. 보내는 쪽이 다시 시작된 뒤에는 보내지 않는다 */
+    if (!node->options.is_publisher && !is_sender_restarted) {
         uint8_t message[PERF_STATUS_BYTES];
         perf_put_report(message, &mine);
         (void)perf_put(&node->status_publisher, message, sizeof(message));
+    }
+
+    /* (4-1) 보내는 쪽: 받는 쪽 보고를 버리고 있으면 원인을 한 번 알린다 (그대로면 15초 뒤 탐색이 중단된다) */
+    if (node->options.is_publisher && !node->is_status_warned &&
+        ((wrong_status_bytes != 0u) || (foreign_status != 0u))) {
+        node->is_status_warned = true;
+        if (wrong_status_bytes != 0u) {
+            printf("[%s] 받는 쪽 status가 %zu B라 버립니다 (이 프로그램은 %u B). 두 PC를 같은 코드로 빌드하세요\n\n",
+                   node->my_name, wrong_status_bytes, (unsigned)PERF_STATUS_BYTES);
+        } else {
+            printf(
+                "[%s] 이 실행이 보낸 것보다 큰 seq를 반영한 보고를 버립니다. 다른 실행의 받는 쪽이 남아 있습니다\n\n",
+                node->my_name);
+        }
+        fflush(stdout);
     }
 
     /* (4) 보내는 쪽: 상대 보고를 보고 탐색을 한 단계 진행하고, 다음 송신량을 스케줄러에 알려 준다 */
@@ -483,18 +508,32 @@ static void perf_rx_update_loss(perf_rx_stream_t* rx, uint32_t peer_published_se
 static void perf_rx_feedback_tick(perf_node_t* node) {
     pthread_mutex_lock(&node->state_lock);
 
-    /* count = [상대가 보낸 마지막 seq] */
+    /* count = [상대가 보낸 마지막 seq]. 한 실행 안에서는 줄지 않으므로, 줄었으면 보내는 쪽이 다시 시작된 것이다.
+     * 그 뒤의 수신 결과는 이전 실행과 섞이므로 이 받는 쪽 실행은 보고를 멈추고 끝낸다. */
     if (node->has_count_mail) {
         uint32_t published_seq;
         (void)perf_get_u32(node->count_mail, &published_seq);
-        perf_rx_update_loss(&node->rx, published_seq);
+        if (node->rx.has_count_seq && (published_seq < node->rx.last_count_seq)) {
+            node->is_sender_restarted = true;
+        } else if (!node->is_sender_restarted) {
+            node->rx.has_count_seq = true;
+            node->rx.last_count_seq = published_seq;
+            perf_rx_update_loss(&node->rx, published_seq);
+        }
         node->has_count_mail = false;
     }
 
-    /* status = [상대가 잰 "내 메시지" 수신 결과] */
+    /* status = [상대가 잰 "내 메시지" 수신 결과]. 내가 보낸 것보다 큰 seq를 반영했다는 보고는
+     * 다른 실행(이전 회차)의 보내는 쪽에 대한 것이므로 버린다. */
     if (node->has_status_mail) {
-        perf_get_report(node->status_mail, &node->peer_view);
-        node->has_peer_view = true;
+        perf_stream_report_t report;
+        perf_get_report(node->status_mail, &report);
+        if (report.counted_seq <= perf_counter_get(&node->tx.published)) {
+            node->peer_view = report;
+            node->has_peer_view = true;
+        } else {
+            node->foreign_status++;
+        }
         node->has_status_mail = false;
     }
 
@@ -594,6 +633,19 @@ static void perf_node_close(perf_node_t* node) {
 static bool perf_node_open(perf_node_t* node, const z_owned_session_t* session, const char* my_name,
                            const char* peer_name, const perf_options_t* options) {
     char key[64];
+    /* status 크기(PERF_STATUS_BYTES)가 put_report가 쓰는 크기와 같은가.
+     * 필드를 더하고 크기를 안 고치면 받는 쪽 status가 모두 버려진다. */
+    {
+        uint8_t probe[PERF_STATUS_BYTES + 16u];
+        perf_stream_report_t zero;
+        memset(&zero, 0, sizeof(zero));
+        const size_t written = (size_t)(perf_put_report(probe, &zero) - probe);
+        if (written != PERF_STATUS_BYTES) {
+            fprintf(stderr, "status 크기가 맞지 않습니다: %zu B를 쓰는데 PERF_STATUS_BYTES는 %u B\n", written,
+                    (unsigned)PERF_STATUS_BYTES);
+            return false;
+        }
+    }
     node->my_name = my_name;
     node->peer_name = peer_name;
     node->options = *options;
@@ -669,26 +721,39 @@ static bool perf_is_finished(perf_node_t* node) {
     if (node->options.is_publisher) return perf_flag_get(&node->is_search_done);
     pthread_mutex_lock(&node->state_lock);
     const uint64_t last_count_us = node->last_count_us;
+    const bool is_sender_restarted = node->is_sender_restarted;
     pthread_mutex_unlock(&node->state_lock);
-    return (last_count_us != 0u) && (perf_now_us() - last_count_us >= PERF_PEER_IDLE_STOP_US);
+    if (is_sender_restarted) return true;
+    const uint64_t now = perf_now_us();
+    if (last_count_us == 0u) {
+        if (now - node->start_us < PERF_PEER_FIRST_COUNT_TIMEOUT_US) return false;
+        node->is_peer_never_seen = true;
+        return true;
+    }
+    return now - last_count_us >= PERF_PEER_IDLE_STOP_US;
 }
 
 #if Z_FEATURE_MULTI_THREAD == 1
 /* MT1: 스케줄러·TX 피드백·RX 피드백 스레드를 띄우고, 끝날 때까지 기다렸다가 정리한다 */
-static void perf_run_threads(perf_node_t* node, volatile sig_atomic_t* is_stop_requested) {
-    pthread_create(&node->tx_feedback_thread, NULL, perf_tx_feedback_main, node);
-    pthread_create(&node->rx_feedback_thread, NULL, perf_rx_feedback_main, node);
-    if (node->options.is_publisher) pthread_create(&node->scheduler_thread, NULL, perf_scheduler_main, node);
+/* 스레드를 모두 만들었으면 true. 하나라도 못 만들면 만든 것만 멈춰 정리하고 false */
+static bool perf_run_threads(perf_node_t* node, volatile sig_atomic_t* is_stop_requested) {
+    const bool has_tx_feedback = pthread_create(&node->tx_feedback_thread, NULL, perf_tx_feedback_main, node) == 0;
+    const bool has_rx_feedback = pthread_create(&node->rx_feedback_thread, NULL, perf_rx_feedback_main, node) == 0;
+    const bool has_scheduler =
+        node->options.is_publisher && (pthread_create(&node->scheduler_thread, NULL, perf_scheduler_main, node) == 0);
+    const bool is_started = has_tx_feedback && has_rx_feedback && (has_scheduler || !node->options.is_publisher);
+    if (!is_started) fprintf(stderr, "측정 스레드를 만들지 못했습니다\n");
 
-    while ((*is_stop_requested == 0) && !perf_is_finished(node)) perf_sleep_ms(100);
+    while (is_started && (*is_stop_requested == 0) && !perf_is_finished(node)) perf_sleep_ms(100);
 
     /* 송신을 멈추고, 피드백은 drain 시간 동안 계속 돌려서 최종 count/status를 주고받는다 */
     perf_flag_set(&node->should_stop_publish, true);
-    if (node->options.is_publisher) pthread_join(node->scheduler_thread, NULL);
-    perf_sleep_ms((long)node->options.drain_s * 1000L);
+    if (has_scheduler) pthread_join(node->scheduler_thread, NULL);
+    if (is_started) perf_sleep_ms((long)node->options.drain_s * 1000L);
     perf_flag_set(&node->should_stop_feedback, true);
-    pthread_join(node->tx_feedback_thread, NULL);
-    pthread_join(node->rx_feedback_thread, NULL);
+    if (has_tx_feedback) pthread_join(node->tx_feedback_thread, NULL);
+    if (has_rx_feedback) pthread_join(node->rx_feedback_thread, NULL);
+    return is_started;
 }
 #else
 /* MT0 (싱글스레드): 라이브러리에 스레드가 없으므로 이 프로그램도 스레드를 만들지 않는다.
@@ -781,8 +846,9 @@ int perf_run(perf_node_t* node, const z_owned_session_t* session, const char* my
     } else {
         printf("제어기 %s 시작 (받는 쪽: 상대가 끝나면 함께 끝남)\n", my_name);
     }
+    int exit_code = 0;
 #if Z_FEATURE_MULTI_THREAD == 1
-    perf_run_threads(node, is_stop_requested);
+    if (!perf_run_threads(node, is_stop_requested)) exit_code = 1;
 #else
     perf_run_single_thread(node, is_stop_requested);
 #endif
@@ -797,7 +863,16 @@ int perf_run(perf_node_t* node, const z_owned_session_t* session, const char* my
                 "셈)\n",
                 node->peer_view.out_of_order);
         }
+        /* 상대 보고가 끊겨 중단한 실행은 결과로 쓰지 않도록 실패로 끝낸다 (test_start.sh가 중앙값에서 뺀다) */
+        if (node->search.is_aborted) exit_code = 1;
+    } else if (node->is_sender_restarted) {
+        printf("\n받는 쪽: 보내는 쪽이 다시 시작된 것을 봐서(count의 seq가 줄어듦) 이 실행을 끝냈습니다.\n");
+        exit_code = 1;
+    } else if (node->is_peer_never_seen) {
+        printf("\n받는 쪽: 시작한 뒤 %u초 동안 보내는 쪽 count가 오지 않아 끝냈습니다.\n",
+               PERF_PEER_FIRST_COUNT_TIMEOUT_US / 1000000u);
+        exit_code = 1;
     }
     perf_node_close(node);
-    return 0;
+    return exit_code;
 }

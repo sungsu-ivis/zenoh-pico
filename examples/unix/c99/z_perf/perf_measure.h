@@ -10,7 +10,7 @@
  *                   탐색 순서는 perf_max_throughput.h 참고.
  *   - 받는 쪽(B)  : 받기만 하면서 0.25초마다 수신 결과(처리량·지터·손실률)를 피드백으로 돌려준다.
  *
- * 구성: A와 B는 서로 다른 PC에서 돌고, UDP multicast 그룹 하나로 주고받는다 (peer 모드, listen locator).
+ * 구성: A와 B는 서로 다른 PC에서 돌고, 빌드한 전송 방식 하나(UDP multicast 그룹 또는 TCP)로 주고받는다 (peer 모드).
  *   같은 PC 안(loopback)에서는 패킷이 NIC 드라이버를 거치지 않으므로 측정하지 않는다.
  *   zenoh-pico는 리눅스에서 UDP unicast listen을 지원하지 않아 unicast로는 두 peer를 UDP로 직접 잇지 못한다.
  *
@@ -49,8 +49,9 @@
  *   라이브러리 스레드와 위 셋을 띄우지 않는다. 메인 스레드 하나가 zp_spin_once(수신 콜백 호출, keep-alive·JOIN 송신,
  *   TCP accept)와 위 세 tick을 같은 시각표로 되풀이한다. 측정 방법과 판정은 MT1과 같다.
  *
- * 두 프로그램은 각 PC의 test_start.sh로 한 회차씩 짝을 맞춰 띄우고 함께 끝낸다. 한쪽만 다시 띄우는 경우는
- * 다루지 않는다 (seq가 1부터 다시 시작하므로 받는 쪽에서는 순서 바뀜으로 세어진다).
+ * 두 프로그램은 각 PC의 test_start.sh로 한 회차씩 짝을 맞춰 띄우고 함께 끝낸다. 다른 실행의 보고가 섞이지 않게 한다.
+ *   - 받는 쪽: 상대 count의 seq가 줄면(보내는 쪽이 다시 시작됨) 보고를 멈추고 그 실행을 끝낸다.
+ *   - 보내는 쪽: 자기가 보낸 것보다 큰 seq를 반영했다는 status는 다른 실행의 것이므로 버린다.
  *
  * 받는 쪽(B)을 반드시 먼저 띄운다.
  *   zenoh-pico publisher는 상대 subscriber가 있을 때만 보낸다(write filter). 라우터 없는 peer 모드에서는
@@ -148,6 +149,8 @@ typedef struct {
     bool has_previous_count;
     uint32_t previous_expected; /* 직전 count 처리 때의 기대 수신 수 */
     uint32_t previous_received; /* 직전 count 처리 때의 실제 수신 수 */
+    bool has_count_seq;         /* 상대 count를 하나라도 처리했는가 */
+    uint32_t last_count_seq;    /* 직전에 처리한 상대 count의 seq. 한 실행 안에서는 줄지 않는다 */
     /* 결과 (구간 마감 / count 처리 때 갱신) */
     perf_stream_report_t report;
 } perf_rx_stream_t;
@@ -182,11 +185,17 @@ typedef struct {
     uint8_t status_mail[PERF_STATUS_BYTES];
     bool has_peer_view;
     perf_stream_report_t peer_view; /* 상대가 잰 "내 메시지" 수신 결과 */
-    uint64_t last_count_us;         /* 상대 count를 마지막으로 받은 시각 (0 = 아직 없음). 상대가 끝났는지 판단용 */
+    uint64_t last_count_us; /* 상대 count를 마지막으로 받은 시각 (0 = 아직 없음). 상대가 끝났는지 판단용 */
+    bool is_sender_restarted; /* 받는 쪽: count의 seq가 줄어 보내는 쪽이 다시 시작된 것을 봤다 (이 실행을 끝낸다) */
+    uint32_t foreign_status;   /* 보내는 쪽: 다른 실행의 것으로 보고 버린 status 수 */
+    size_t wrong_status_bytes; /* 크기가 달라 버린 status의 크기 (0 = 없음) */
 
     uint64_t last_tick_us;  /* TX 피드백: 직전 구간 마감 시각 */
     uint32_t print_seconds; /* TX 피드백: 1초 출력 번호 ([a Ns]의 N). 1초 경계를 지난 횟수 */
     uint32_t feedback_ticks; /* TX 피드백: tick 번호. 1초에 한 번(1초 경계) 구간을 마감하고 출력한다 */
+
+    bool is_status_warned; /* 보내는 쪽: 버린 status를 이미 알렸는가 (TX 피드백 전용) */
+    bool is_peer_never_seen; /* 받는 쪽: 시작한 뒤 상대 count가 한 번도 오지 않아 기다리기를 멈췄다 (main 전용) */
 
     perf_atomic_bool_t is_ready; /* 콜백이 상태를 써도 되는가 */
     perf_atomic_bool_t should_stop_publish;

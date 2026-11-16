@@ -178,9 +178,15 @@ static uint32_t perf_finish_search_step(perf_search_t* s, uint64_t now_us, uint3
         s->phase = PERF_SEARCH_DONE;
         return 0u;
     }
-    printf("[%s 확인] 탐색 끝 (통과한 최대 목표 %u msg/s). 이 값으로 %u초 동안 다시 보내 확인합니다\n\n", my_name,
-           s->pass_rate, PERF_SEARCH_CONFIRM_US / 1000000u);
-    perf_start_confirm(s, now_us, published, s->pass_rate);
+    /* 확인 목표: 통과한 최대 목표. 단 통과한 단계의 실제 송신량이 더 적으면(목표의 95% 이상이라 통과) 실제 송신량.
+     * 링크가 받아 주는 양보다 높게 보내면 확인 내내 BUSY 재시도로 소켓이 꽉 찬 채 확인하게 된다. */
+    const uint32_t confirm_rate =
+        ((s->best_actual_rate != 0u) && (s->best_actual_rate < s->pass_rate)) ? s->best_actual_rate : s->pass_rate;
+    printf(
+        "[%s 확인] 탐색 끝 (통과한 최대 목표 %u msg/s, 실제 최대 %u msg/s). %u msg/s로 %u초 동안 다시 보내 "
+        "확인합니다\n\n",
+        my_name, s->pass_rate, s->best_actual_rate, confirm_rate, PERF_SEARCH_CONFIRM_US / 1000000u);
+    perf_start_confirm(s, now_us, published, confirm_rate);
     return s->target_rate;
 }
 
@@ -289,11 +295,12 @@ void perf_search_print_result(const perf_search_t* s, const char* my_name, const
     printf("  미수신      : %u개 / 보냄 %u개 (%.3f%%, 결과 단계)\n", result_lost, result_sent,
            perf_lost_pct(result_lost, result_sent));
     if (s->fail_rate == 0u) {
-        printf("  탐색        : 통과한 최대 목표 %u msg/s, 실패한 단계 없음 (%u단계, 단계마다 %u초)\n", s->pass_rate,
-               s->step_no, PERF_SEARCH_SEND_US / 1000000u);
+        printf("  탐색        : 통과한 최대 목표 %u msg/s (실제 %u), 실패한 단계 없음 (%u단계, 단계마다 %u초)\n",
+               s->pass_rate, s->best_actual_rate, s->step_no, PERF_SEARCH_SEND_US / 1000000u);
     } else {
-        printf("  탐색        : 통과한 최대 목표 %u msg/s, 실패한 최소 목표 %u msg/s (%u단계, 단계마다 %u초)\n",
-               s->pass_rate, s->fail_rate, s->step_no, PERF_SEARCH_SEND_US / 1000000u);
+        printf(
+            "  탐색        : 통과한 최대 목표 %u msg/s (실제 %u), 실패한 최소 목표 %u msg/s (%u단계, 단계마다 %u초)\n",
+            s->pass_rate, s->best_actual_rate, s->fail_rate, s->step_no, PERF_SEARCH_SEND_US / 1000000u);
     }
     if (s->is_confirmed) {
         printf("  확인        : 목표 %u msg/s로 %u초 동안 허용 미수신율 이내 (%u회째 통과)\n", s->confirmed_target_rate,
@@ -303,7 +310,8 @@ void perf_search_print_result(const perf_search_t* s, const char* my_name, const
                PERF_SEARCH_CONFIRM_US / 1000000u);
     }
     if (s->is_sender_limited) {
-        printf("  참고        : 목표만큼 보내지 못한 단계가 있었습니다. 이 값은 링크·수신 측이 아니라\n"
-               "                송신 측(CPU, zenoh 송신 처리)의 한계일 수 있습니다.\n");
+        printf(
+            "  참고        : 목표만큼 보내지 못한 단계가 있었습니다. 송신 측(CPU, zenoh 송신 처리)의 한계이거나\n"
+            "                링크가 더 받아 주지 못한 것(TCP 흐름 제어, 꽉 찬 송신 버퍼)입니다. 미수신은 아닙니다.\n");
     }
 }
