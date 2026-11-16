@@ -36,25 +36,18 @@
  *
  * 피드백 메시지 (0.25초마다, 측정 대상 아님. 처리량·지터는 1초 구간 값)
  *   count  (4 B)  : 보내는 쪽 → 받는 쪽. [지금까지 보낸 마지막 seq]
- *   status (76 B) : 받는 쪽 → 보내는 쪽. [수신 결과 perf_stream_report_t] (처리량·지터·손실률·집계 기준 seq,
- *                   받는 쪽의 누적 CPU 시간)
- *
- * CPU 부하 (결과에 출력): 결과를 낸 확인 단계 15초 동안 두 PC 각각에서 프로그램을 묶은 코어 하나의 평균 부하.
- *   보내는 쪽은 확인 단계를 시작할 때와 끝낼 때 자기 누적 CPU 시간과, 그때 갖고 있던 가장 최근 status의
- *   받는 쪽 누적 CPU 시간을 잡아 둘의 차이로 계산한다 (perf_cpu_load.h).
+ *   status (68 B) : 받는 쪽 → 보내는 쪽. [수신 결과 perf_stream_report_t] (처리량·지터·손실률·집계 기준 seq)
  *
  * 스레드 (라이브러리를 Z_FEATURE_MULTI_THREAD=1로 빌드했을 때)
  *   - 스케줄러   : 1 ms마다 깨어나 목표 송신량만큼 메시지를 보내고, 0.25초마다 count도 보낸다.
  *                  (데이터와 count를 한 스레드가 보내므로 순서가 저절로 지켜져 송신 쪽에는 락이 없다)
  *   - TX 피드백  : 0.25초마다 status를 보내고 탐색을 한 단계 진행한다. 1초마다 수신 구간을 마감하고 한 줄 출력한다.
  *   - RX 피드백  : 0.25초마다 받은 count로 미수신율을 계산하고, 받은 status를 저장한다.
- *   - CPU 샘플   : 1초마다 이 프로그램이 도는 코어의 CPU 부하율을 잰다 (perf_cpu_load.h).
- *   - CPU 통계   : 10초마다 그동안의 샘플 10개로 평균·최소·최대·표준편차를 한 줄 출력한다.
  *   (데이터와 피드백 수신 자체는 zenoh-pico executor 스레드가 콜백으로 처리한다)
  *
  * 싱글스레드 (Z_FEATURE_MULTI_THREAD=0으로 빌드했을 때. multicast, TCP)
- *   라이브러리 스레드와 위 다섯을 띄우지 않는다. 메인 스레드 하나가 zp_spin_once(수신 콜백 호출, keep-alive·JOIN 송신,
- *   TCP accept)와 위 다섯 tick을 같은 시각표로 되풀이한다. 측정 방법과 판정은 MT1과 같다.
+ *   라이브러리 스레드와 위 셋을 띄우지 않는다. 메인 스레드 하나가 zp_spin_once(수신 콜백 호출, keep-alive·JOIN 송신,
+ *   TCP accept)와 위 세 tick을 같은 시각표로 되풀이한다. 측정 방법과 판정은 MT1과 같다.
  *
  * 두 프로그램은 각 PC의 test_start.sh로 한 회차씩 짝을 맞춰 띄우고 함께 끝낸다. 한쪽만 다시 띄우는 경우는
  * 다루지 않는다 (seq가 1부터 다시 시작하므로 받는 쪽에서는 순서 바뀜으로 세어진다).
@@ -76,13 +69,12 @@
 #include <stdint.h>
 #include <zenoh-pico.h>
 
-#include "perf_cpu_load.h"
 #include "perf_max_throughput.h"
 
 #define PERF_PAYLOAD_BYTES 128 /* 데이터 메시지 전체 크기 */
 #define PERF_HEADER_BYTES 12   /* 그중 측정용 헤더 크기: seq 4 + 송신 시각 8 */
 #define PERF_COUNT_BYTES 4     /* count 메시지 크기 */
-#define PERF_STATUS_BYTES 76   /* status 메시지 크기 (perf_stream_report_t를 순서대로 담은 것) */
+#define PERF_STATUS_BYTES 68   /* status 메시지 크기 (perf_stream_report_t를 순서대로 담은 것) */
 
 /* 스레드 사이에 나누는 값. GCC/Clang의 __atomic 내장 함수로 읽고 쓴다 (perf_measure.c) */
 typedef struct {
@@ -117,19 +109,7 @@ typedef struct {
     uint32_t jitter_max_abs_us;       /* 직전 1초: |D| 최댓값 */
     uint32_t counted_seq;             /* 집계 기준 seq: 미수신 계산에 쓴 상대 count의 마지막 seq.
                                          보내는 쪽은 이 값으로 자기 메시지가 어디까지 반영됐는지 안다 */
-    perf_cpu_usage_t cpu;             /* status를 보낸 순간 받는 쪽의 누적 CPU 시간 */
 } perf_stream_report_t;
-
-/* 확인 단계의 CPU 부하 (보내는 쪽 TX 피드백 스레드만 쓰고, 끝난 뒤 main이 읽는다) */
-typedef struct {
-    perf_cpu_usage_t start_mine; /* 확인 단계를 시작할 때 내 누적 CPU 시간 */
-    perf_cpu_usage_t start_peer; /* 그때 갖고 있던 가장 최근 status의 받는 쪽 누적 CPU 시간 */
-    bool has_value;              /* 끝난 확인 단계의 값이 있는가 */
-    uint32_t try_no;             /* 그 값이 몇 번째 확인 단계의 것인가 */
-    uint32_t actual_rate;        /* 그 확인 단계의 실제 송신량 (msg/s) */
-    double mine_pct;             /* 보내는 쪽 평균 부하 (%). 음수 = 재지 못함 */
-    double peer_pct;             /* 받는 쪽 평균 부하 (%). 음수 = 재지 못함 */
-} perf_confirm_cpu_t;
 
 /* num0 송신 상태.
  * 쓰는 것은 스케줄러 스레드 하나뿐이다. 다른 스레드(TX 피드백, main)가 읽는 카운터만 atomic으로 둔다. */
@@ -207,17 +187,12 @@ typedef struct {
     uint32_t print_seconds; /* TX 피드백: 1초 출력 번호 ([a Ns]의 N). 1초 경계를 지난 횟수 */
     uint32_t feedback_ticks; /* TX 피드백: tick 번호. 1초에 한 번(1초 경계) 구간을 마감하고 출력한다 */
 
-    perf_cpu_load_t cpu_load;       /* CPU 부하: 1초 샘플, 10초 통계 */
-    perf_confirm_cpu_t confirm_cpu; /* 보내는 쪽: 확인 단계 15초의 두 PC CPU 부하 */
-
     perf_atomic_bool_t is_ready; /* 콜백이 상태를 써도 되는가 */
     perf_atomic_bool_t should_stop_publish;
     perf_atomic_bool_t should_stop_feedback;
     pthread_t scheduler_thread;
     pthread_t tx_feedback_thread;
     pthread_t rx_feedback_thread;
-    pthread_t cpu_sample_thread;
-    pthread_t cpu_report_thread;
 } perf_node_t;
 
 /* 보내는 쪽 실행 인자에서 허용 미수신율 (%)을 읽는다: 2, 3, 5 중 하나 ("3%"처럼 %를 붙여도 된다).

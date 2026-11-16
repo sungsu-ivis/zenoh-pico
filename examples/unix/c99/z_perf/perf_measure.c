@@ -338,7 +338,7 @@ static void perf_rx_close_interval(perf_rx_stream_t* rx, uint64_t interval_us) {
     rx->interval_max_abs_us = 0u;
 }
 
-/* report → status 메시지 (PERF_STATUS_BYTES = 76 B) */
+/* report → status 메시지 (PERF_STATUS_BYTES = 68 B) */
 static void perf_put_report(uint8_t* p, const perf_stream_report_t* r) {
     p = perf_put_u32(p, r->received);
     p = perf_put_u32(p, r->interval_received);
@@ -353,9 +353,7 @@ static void perf_put_report(uint8_t* p, const perf_stream_report_t* r) {
     p = perf_put_f64(p, r->jitter_mean_us);
     p = perf_put_f64(p, r->jitter_variance_us2);
     p = perf_put_u32(p, r->jitter_max_abs_us);
-    p = perf_put_u32(p, r->counted_seq);
-    p = perf_put_u32(p, r->cpu.busy_ms);
-    (void)perf_put_u32(p, r->cpu.elapsed_ms);
+    (void)perf_put_u32(p, r->counted_seq);
 }
 
 /* status 메시지 → report */
@@ -373,34 +371,7 @@ static void perf_get_report(const uint8_t* p, perf_stream_report_t* r) {
     p = perf_get_f64(p, &r->jitter_mean_us);
     p = perf_get_f64(p, &r->jitter_variance_us2);
     p = perf_get_u32(p, &r->jitter_max_abs_us);
-    p = perf_get_u32(p, &r->counted_seq);
-    p = perf_get_u32(p, &r->cpu.busy_ms);
-    (void)perf_get_u32(p, &r->cpu.elapsed_ms);
-}
-
-/* 확인 단계에 보내는 중인가 */
-static bool perf_is_confirm_sending(const perf_search_t* s) {
-    return (s->kind == PERF_STEP_CONFIRM) && (s->phase == PERF_SEARCH_SENDING);
-}
-
-/* 확인 단계의 CPU 부하: 보내기를 시작할 때와 끝낼 때 두 PC의 누적 CPU 시간을 잡아 그 15초의 평균을 낸다.
- * 받는 쪽 값은 그 순간 갖고 있던 가장 최근 status의 값이라 구간이 최대 0.25초쯤 앞당겨진다. */
-static void perf_track_confirm_cpu(perf_node_t* node, bool was_sending, const perf_stream_report_t* peer) {
-    const perf_cpu_usage_t none = {0u, 0u};
-    const bool is_sending = perf_is_confirm_sending(&node->search);
-    perf_confirm_cpu_t* c = &node->confirm_cpu;
-    if (!was_sending && is_sending) {
-        c->start_mine = perf_cpu_load_usage(&node->cpu_load);
-        c->start_peer = (peer != NULL) ? peer->cpu : none;
-    } else if (was_sending && !is_sending) {
-        const perf_cpu_usage_t end_mine = perf_cpu_load_usage(&node->cpu_load);
-        const perf_cpu_usage_t end_peer = (peer != NULL) ? peer->cpu : none;
-        c->has_value = true;
-        c->try_no = node->search.confirm_tries;
-        c->actual_rate = node->search.step_actual_rate;
-        c->mine_pct = perf_cpu_usage_load_pct(c->start_mine, end_mine);
-        c->peer_pct = perf_cpu_usage_load_pct(c->start_peer, end_peer);
-    }
+    (void)perf_get_u32(p, &r->counted_seq);
 }
 
 static void perf_tx_feedback_tick(perf_node_t* node) {
@@ -421,25 +392,22 @@ static void perf_tx_feedback_tick(perf_node_t* node) {
         perf_rx_close_interval(&node->rx, now - node->last_tick_us);
         node->last_tick_us = now;
     }
-    perf_stream_report_t mine = node->rx.report;
+    const perf_stream_report_t mine = node->rx.report;
     const perf_stream_report_t peer = node->peer_view;
     const bool has_peer_view = node->has_peer_view;
     pthread_mutex_unlock(&node->state_lock);
 
-    /* (3) 받는 쪽: status = [내 수신 결과, 내 누적 CPU 시간] */
+    /* (3) 받는 쪽: status = [내 수신 결과] */
     if (!node->options.is_publisher) {
         uint8_t message[PERF_STATUS_BYTES];
-        mine.cpu = perf_cpu_load_usage(&node->cpu_load);
         perf_put_report(message, &mine);
         (void)perf_put(&node->status_publisher, message, sizeof(message));
     }
 
     /* (4) 보내는 쪽: 상대 보고를 보고 탐색을 한 단계 진행하고, 다음 송신량을 스케줄러에 알려 준다 */
     if (node->options.is_publisher && !perf_flag_get(&node->is_search_done)) {
-        const bool was_confirm_sending = perf_is_confirm_sending(&node->search);
         const uint32_t rate = perf_search_step(&node->search, now, published, has_peer_view, peer.counted_seq,
                                                peer.unreceived, node->my_name);
-        perf_track_confirm_cpu(node, was_confirm_sending, has_peer_view ? &peer : NULL);
         perf_target_rate_set(node, rate);
         if (perf_search_is_done(&node->search)) perf_flag_set(&node->is_search_done, true);
     }
@@ -562,30 +530,6 @@ static bool perf_sleep_until_or_stop(const struct timespec* t, perf_atomic_bool_
     }
 }
 
-/* CPU 샘플 스레드 (1초): 1초 경계마다 샘플 하나 (1초 출력과 같은 순간) */
-static void* perf_cpu_sample_main(void* arg) {
-    perf_node_t* node = (perf_node_t*)arg;
-    struct timespec next;
-    perf_first_tick_at(&next, 0L);
-    while (perf_sleep_until_or_stop(&next, &node->should_stop_feedback)) {
-        perf_cpu_load_sample_tick(&node->cpu_load);
-        perf_timespec_add_ms(&next, (long)PERF_CPU_SAMPLE_PERIOD_MS);
-    }
-    return NULL;
-}
-
-/* CPU 통계 스레드 (10초): 10번째 샘플 0.5초 뒤부터 10초마다 */
-static void* perf_cpu_report_main(void* arg) {
-    perf_node_t* node = (perf_node_t*)arg;
-    struct timespec next;
-    perf_first_tick_at(&next, (long)PERF_CPU_REPORT_OFFSET_MS);
-    perf_timespec_add_ms(&next, (long)(PERF_CPU_REPORT_PERIOD_MS - PERF_CPU_SAMPLE_PERIOD_MS));
-    while (perf_sleep_until_or_stop(&next, &node->should_stop_feedback)) {
-        perf_cpu_load_report_tick(&node->cpu_load, node->my_name, false);
-        perf_timespec_add_ms(&next, (long)PERF_CPU_REPORT_PERIOD_MS);
-    }
-    return NULL;
-}
 #endif
 
 /* ===================================================================
@@ -711,12 +655,10 @@ static bool perf_is_finished(perf_node_t* node) {
 }
 
 #if Z_FEATURE_MULTI_THREAD == 1
-/* MT1: 스케줄러·TX 피드백·RX 피드백·CPU 샘플·CPU 통계 스레드를 띄우고, 끝날 때까지 기다렸다가 정리한다 */
+/* MT1: 스케줄러·TX 피드백·RX 피드백 스레드를 띄우고, 끝날 때까지 기다렸다가 정리한다 */
 static void perf_run_threads(perf_node_t* node, volatile sig_atomic_t* is_stop_requested) {
     pthread_create(&node->tx_feedback_thread, NULL, perf_tx_feedback_main, node);
     pthread_create(&node->rx_feedback_thread, NULL, perf_rx_feedback_main, node);
-    pthread_create(&node->cpu_sample_thread, NULL, perf_cpu_sample_main, node);
-    pthread_create(&node->cpu_report_thread, NULL, perf_cpu_report_main, node);
     if (node->options.is_publisher) pthread_create(&node->scheduler_thread, NULL, perf_scheduler_main, node);
 
     while ((*is_stop_requested == 0) && !perf_is_finished(node)) perf_sleep_ms(100);
@@ -728,8 +670,6 @@ static void perf_run_threads(perf_node_t* node, volatile sig_atomic_t* is_stop_r
     perf_flag_set(&node->should_stop_feedback, true);
     pthread_join(node->tx_feedback_thread, NULL);
     pthread_join(node->rx_feedback_thread, NULL);
-    pthread_join(node->cpu_sample_thread, NULL);
-    pthread_join(node->cpu_report_thread, NULL);
 }
 #else
 /* MT0 (싱글스레드): 라이브러리에 스레드가 없으므로 이 프로그램도 스레드를 만들지 않는다.
@@ -738,8 +678,7 @@ static void perf_run_threads(perf_node_t* node, volatile sig_atomic_t* is_stop_r
  *     수신은 받을 것이 없으면 소켓 timeout(Z_CONFIG_SOCKET_TIMEOUT)만큼 기다렸다 돌아온다.
  *     MT0 빌드는 이 값을 1 ms로 둔다 (커널은 tick 단위로 올리므로 실제로는 1~10 ms)
  *   - 보내는 쪽: 1 ms마다 스케줄러 tick
- *   - 0.25초마다 TX 피드백 tick (1초 경계부터), RX 피드백 tick (반 박자 뒤부터)
- *   - 1초마다 CPU 샘플 tick (1초 경계부터), 10초마다 CPU 통계 tick (10번째 샘플 0.5초 뒤부터) */
+ *   - 0.25초마다 TX 피드백 tick (1초 경계부터), RX 피드백 tick (반 박자 뒤부터) */
 static void perf_run_single_thread(perf_node_t* node, volatile sig_atomic_t* is_stop_requested) {
     const z_loaned_session_t* session = z_session_loan(node->session);
     const uint64_t feedback_period_us = (uint64_t)PERF_FEEDBACK_PERIOD_MS * 1000u;
@@ -749,11 +688,6 @@ static void perf_run_single_thread(perf_node_t* node, volatile sig_atomic_t* is_
     uint64_t rate_credit = 0u;
     uint64_t next_tx_feedback_us = (now / 1000000u + 1u) * 1000000u; /* 다음 1초 경계 */
     uint64_t next_rx_feedback_us = next_tx_feedback_us + feedback_period_us / 2u;
-    uint64_t next_cpu_sample_us = next_tx_feedback_us;
-    /* 첫 CPU 통계: 10번째 샘플(첫 샘플 + 9초) 0.5초 뒤 */
-    const uint64_t cpu_first_report_ms =
-        (uint64_t)PERF_CPU_REPORT_PERIOD_MS - PERF_CPU_SAMPLE_PERIOD_MS + PERF_CPU_REPORT_OFFSET_MS;
-    uint64_t next_cpu_report_us = next_tx_feedback_us + cpu_first_report_ms * 1000u;
     uint64_t next_finish_check_us = now + 100000u; /* MT1처럼 0.1초마다 끝낼 때인지 본다 */
     uint64_t drain_end_us = 0u;                    /* 0이면 아직 송신 중 */
     bool is_publishing = node->options.is_publisher;
@@ -775,14 +709,6 @@ static void perf_run_single_thread(perf_node_t* node, volatile sig_atomic_t* is_
             perf_rx_feedback_tick(node);
             next_rx_feedback_us += feedback_period_us;
         }
-        if (now >= next_cpu_sample_us) {
-            perf_cpu_load_sample_tick(&node->cpu_load);
-            next_cpu_sample_us += (uint64_t)PERF_CPU_SAMPLE_PERIOD_MS * 1000u;
-        }
-        if (now >= next_cpu_report_us) {
-            perf_cpu_load_report_tick(&node->cpu_load, node->my_name, false);
-            next_cpu_report_us += (uint64_t)PERF_CPU_REPORT_PERIOD_MS * 1000u;
-        }
 
         if (drain_end_us != 0u) {
             if (now >= drain_end_us) break;
@@ -800,35 +726,6 @@ static void perf_run_single_thread(perf_node_t* node, volatile sig_atomic_t* is_
     perf_flag_set(&node->should_stop_feedback, true);
 }
 #endif
-
-/* CPU 부하 한 칸: "40.2% (메시지당 0.46 µs)" */
-static void perf_format_cpu(char* out, size_t size, double pct, uint32_t rate) {
-    if (pct < 0.0) {
-        snprintf(out, size, "재지 못함");
-    } else if (rate == 0u) {
-        snprintf(out, size, "%.1f%%", pct);
-    } else {
-        snprintf(out, size, "%.1f%% (메시지당 %.2f µs)", pct, pct / 100.0 * 1e6 / (double)rate);
-    }
-}
-
-/* 결과에 붙이는 CPU 부하: 결과를 낸 확인 단계 15초 동안의 두 PC 평균 부하 */
-static void perf_print_confirm_cpu(const perf_node_t* node) {
-    const perf_search_t* s = &node->search;
-    const perf_confirm_cpu_t* c = &node->confirm_cpu;
-    if (s->best_actual_rate == 0u) return; /* 결과가 없으면 출력하지 않는다 */
-    if (!s->is_confirmed || !c->has_value || (c->try_no != s->confirm_tries)) {
-        printf("  CPU 부하    : 확인 단계를 통과하지 못해 내지 않음\n");
-        return;
-    }
-    char mine[64];
-    char peer[64];
-    perf_format_cpu(mine, sizeof(mine), c->mine_pct, c->actual_rate);
-    perf_format_cpu(peer, sizeof(peer), c->peer_pct, c->actual_rate);
-    printf("  CPU 부하    : 보내는 쪽 %s\n", mine);
-    printf("                받는 쪽   %s\n", peer);
-    printf("                (확인 단계 평균. 각 PC에서 프로그램을 묶은 코어 하나, 커널 처리 포함)\n");
-}
 
 bool perf_parse_unreceived_pct(int argc, char** argv, uint32_t* pct) {
     static const uint32_t allowed[] = {2u, 3u, 5u};
@@ -853,7 +750,6 @@ bool perf_parse_unreceived_pct(int argc, char** argv, uint32_t* pct) {
 int perf_run(perf_node_t* node, const z_owned_session_t* session, const char* my_name, const char* peer_name,
              const perf_options_t* options, volatile sig_atomic_t* is_stop_requested) {
     if (!perf_node_open(node, session, my_name, peer_name, options)) return 1;
-    perf_cpu_load_open(&node->cpu_load); /* CPU 부하 기준값 (첫 샘플은 다음 1초 경계) */
     node->start_us = perf_now_us();
     node->last_tick_us = node->start_us;
     perf_flag_set(&node->is_ready, true); /* 이제부터 콜백이 통계를 쓴다 */
@@ -867,24 +763,15 @@ int perf_run(perf_node_t* node, const z_owned_session_t* session, const char* my
     } else {
         printf("제어기 %s 시작 (받는 쪽: 상대가 끝나면 함께 끝남)\n", my_name);
     }
-    if (node->cpu_load.is_available) {
-        printf("CPU 부하: %s (1초마다 샘플, 10초마다 평균·최소·최대·표준편차 출력)\n", node->cpu_load.label);
-    } else {
-        printf("CPU 부하: /proc/stat이나 CPU affinity를 읽지 못해 재지 않습니다\n");
-    }
 #if Z_FEATURE_MULTI_THREAD == 1
     perf_run_threads(node, is_stop_requested);
 #else
     perf_run_single_thread(node, is_stop_requested);
 #endif
     perf_flag_set(&node->is_ready, false);
-    perf_cpu_load_report_tick(&node->cpu_load, my_name, true); /* 10초가 안 된 마지막 샘플 */
 
     perf_print_summary(node);
-    if (options->is_publisher) {
-        perf_search_print_result(&node->search, my_name, peer_name);
-        perf_print_confirm_cpu(node);
-    }
+    if (options->is_publisher) perf_search_print_result(&node->search, my_name, peer_name);
     perf_node_close(node);
     return 0;
 }
