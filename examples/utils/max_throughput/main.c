@@ -1,17 +1,19 @@
 /*
- * 네트워크 성능 측정 예제 (zenoh-pico) - 제어기 B (받는 쪽)
+ * 네트워크 성능 측정 예제 (zenoh-pico) - 제어기 A (보내는 쪽: 최대 처리량 탐색)
  *
- * brightonz.foundation의 z_perf 예제와 같은 측정을 zenoh-pico로 한다. 구조는 perf_measure.h 참고.
- * 세션      : peer 모드. UDP multicast (PERF_LOCATOR), 또는 TCP unicast (PERF_TRANSPORT_TCP=1로 빌드한 z_perf_tcp_*)
- *             TCP는 B(이쪽)가 PERF_LOCATOR 주소로 A의 접속을 기다린다.
- *             #iface=는 이 프로그램을 돌릴 PC(받는 쪽)의 NIC 이름으로 바꾸고 빌드한다.
- * 받는 것   : perf/msg/a/b/num0, perf/report/a/b/count
- * 보내는 것 : perf/report/b/a/status (0.25초마다 수신 결과를 A에게)
+ * brightonz.foundation의 max_throughput 예제와 같은 측정을 zenoh-pico로 한다. 구조는 perf_measure.h 참고.
+ * 세션      : peer 모드. UDP multicast (PERF_LOCATOR), 또는 TCP unicast (PERF_TRANSPORT_TCP=1로 빌드한 max_throughput_tcp_*)
+ *             TCP는 B가 PERF_LOCATOR 주소로 연결을 기다리고 A가 그 주소로 접속한다.
+ *             #iface=는 이 프로그램을 돌릴 PC(보내는 쪽)의 NIC 이름으로 바꾸고 빌드한다.
+ * 보내는 것 : perf/msg/a/b/num0, perf/report/a/b/count
+ * 받는 것   : perf/report/b/a/status (B가 잰 수신 결과)
  *
- * 실행: 받는 쪽 PC에서 build/examples/z_perf/test_start.sh peer
- *       (TCP는 build/examples/z_perf_tcp/test_start.sh peer)
- *       (이쪽을 먼저 띄운 뒤 보내는 쪽 PC에서 test_start.sh tester를 띄운다)
- *       A가 끝나면(count가 5초 동안 끊기면) 요약을 출력하고 스스로 끝난다.
+ * 실행: 보내는 쪽 PC에서 build/examples/max_throughput/test_start.sh tester
+ *       (TCP는 build/examples/max_throughput_tcp/test_start.sh tester)
+ *       (받는 쪽 PC에서 test_start.sh peer를 먼저 띄운다)
+ *       탐색이 끝나면 결과를 출력하고 스스로 끝난다.
+ *       직접 실행할 때: max_throughput_tester [허용 미수신율 2|3|5 (%)]. 주지 않으면 2%.
+ *       test_start.sh는 LOSS_PCT 값을 이 인자로 넘긴다.
  */
 #include <signal.h>
 #include <stdio.h>
@@ -23,12 +25,12 @@
 #define PERF_STR_(x) #x
 #define PERF_STR(x) PERF_STR_(x)
 
-#define PERF_MY_NAME "b"
-#define PERF_PEER_NAME "a"
+#define PERF_MY_NAME "a"
+#define PERF_PEER_NAME "b"
 
 /* 측정 설정 */
 #ifndef PERF_TRANSPORT_TCP
-#define PERF_TRANSPORT_TCP 0 /* 1: TCP unicast. CMake가 z_perf_tcp_* 대상(build/examples/z_perf_tcp/)에 1을 준다 */
+#define PERF_TRANSPORT_TCP 0 /* 1: TCP unicast. CMake가 max_throughput_tcp_* 대상(build/examples/max_throughput_tcp/)에 1을 준다 */
 #endif
 #if PERF_TRANSPORT_TCP
 #define PERF_LOCATOR "tcp/10.0.128.111:19155" /* B(받는 쪽) PC의 IP와 포트. 두 PC 모두 같은 값 */
@@ -36,7 +38,7 @@
 #define PERF_LOCATOR "udp/239.192.0.78:19153#iface=enp7s0" /* multicast 그룹과 이 PC의 NIC */
 #endif
 #define PERF_DRAIN_S 2u                                   /* 송신을 멈춘 뒤 늦게 오는 메시지를 기다리는 시간 (초) */
-#define PERF_IS_PUBLISHER false                           /* true: 보내는 쪽(최대 처리량 탐색), false: 받는 쪽 */
+#define PERF_IS_PUBLISHER true                            /* true: 보내는 쪽(최대 처리량 탐색), false: 받는 쪽 */
 
 #if Z_FEATURE_PUBLICATION == 1 && Z_FEATURE_SUBSCRIPTION == 1 && Z_FEATURE_BATCHING == 1 && \
     ((PERF_TRANSPORT_TCP && Z_FEATURE_LINK_TCP == 1 && Z_FEATURE_UNICAST_PEER == 1) ||           \
@@ -48,11 +50,14 @@ static void perf_on_signal(int signal_number) {
     perf_is_stop_requested = 1;
 }
 
-int main(void) {
+int main(int argc, char** argv) {
     static perf_node_t node; /* 콜백이 쓰는 측정 상태. 선언 전에 0으로 준비돼 있어야 한다 */
+    uint32_t allowed_unreceived_pct;
+    if (!perf_parse_unreceived_pct(argc, argv, &allowed_unreceived_pct)) return 1;
     const perf_options_t options = {
         .drain_s = PERF_DRAIN_S,
         .is_publisher = PERF_IS_PUBLISHER,
+        .allowed_unreceived_pct = allowed_unreceived_pct,
     };
 
     signal(SIGINT, perf_on_signal);
@@ -61,7 +66,9 @@ int main(void) {
     z_owned_config_t config;
     z_config_default(&config);
     zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_MODE_KEY, "peer");
-    zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_LISTEN_KEY, PERF_LOCATOR);
+    /* multicast는 그룹에 들어가고(listen), TCP는 B에 접속한다(connect) */
+    zp_config_insert(z_config_loan_mut(&config), PERF_TRANSPORT_TCP ? Z_CONFIG_CONNECT_KEY : Z_CONFIG_LISTEN_KEY,
+                     PERF_LOCATOR);
 
     z_owned_session_t session;
     const z_result_t opened = z_open(&session, z_config_move(&config), NULL);
@@ -87,7 +94,7 @@ int main(void) {
 }
 #else
 int main(void) {
-    printf("ERROR: z_perf needs Z_FEATURE_PUBLICATION, SUBSCRIPTION, BATCHING and LINK_UDP_MULTICAST\n"
+    printf("ERROR: max_throughput needs Z_FEATURE_PUBLICATION, SUBSCRIPTION, BATCHING and LINK_UDP_MULTICAST\n"
            "       (TCP: LINK_TCP and UNICAST_PEER).\n");
     return -2;
 }

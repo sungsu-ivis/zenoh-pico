@@ -90,34 +90,34 @@ if(UNIX)
         add_example(z_queryable_lat unix/c11/z_queryable_lat.c THREADS)
     endif()
 
-    # z_perf is one measurement pair (same measurement as the brightonz.foundation z_perf example).
+    # max_throughput is one measurement pair (same measurement as the brightonz.foundation max_throughput example).
     # It only uses the C99 API, so it builds with either C standard. Both executables and the run
-    # script share one folder: z_perf/bin/{z_perf_tester,z_perf_peer} and z_perf/test_start.sh.
+    # script share one folder: max_throughput/bin/{max_throughput_tester,max_throughput_peer} and max_throughput/test_start.sh.
     find_package(Threads REQUIRED)
-    add_example(z_perf_tester unix/c99/z_perf/main.c)
-    add_example(z_perf_peer unix/c99/z_perf/main_peer.c)
-    foreach(z_perf_target IN ITEMS z_perf_tester z_perf_peer)
-        target_sources(${z_perf_target} PRIVATE unix/c99/z_perf/perf_measure.c unix/c99/z_perf/perf_max_throughput.c)
-        target_link_libraries(${z_perf_target} PRIVATE Threads::Threads m)
-        set_target_properties(${z_perf_target} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/z_perf/bin")
+    add_example(max_throughput_tester utils/max_throughput/main.c)
+    add_example(max_throughput_peer utils/max_throughput/main_peer.c)
+    foreach(max_throughput_target IN ITEMS max_throughput_tester max_throughput_peer)
+        target_sources(${max_throughput_target} PRIVATE utils/max_throughput/perf_measure.c utils/max_throughput/perf_max_throughput.c)
+        target_link_libraries(${max_throughput_target} PRIVATE Threads::Threads m)
+        set_target_properties(${max_throughput_target} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/max_throughput/bin")
     endforeach()
-    configure_file(unix/c99/z_perf/test_start.sh "${CMAKE_CURRENT_BINARY_DIR}/z_perf/test_start.sh" COPYONLY)
-    # z_perf over TCP unicast: the same sources built with PERF_TRANSPORT_TCP=1 (B listens, A connects).
-    # Its own folder z_perf_tcp/ keeps the executable names, so the same test_start.sh runs it.
-    foreach(z_perf_role IN ITEMS tester peer)
-        if(z_perf_role STREQUAL "tester")
-            add_example(z_perf_tcp_tester unix/c99/z_perf/main.c)
+    configure_file(utils/max_throughput/test_start.sh "${CMAKE_CURRENT_BINARY_DIR}/max_throughput/test_start.sh" COPYONLY)
+    # max_throughput over TCP unicast: the same sources built with PERF_TRANSPORT_TCP=1 (B listens, A connects).
+    # Its own folder max_throughput_tcp/ keeps the executable names, so the same test_start.sh runs it.
+    foreach(max_throughput_role IN ITEMS tester peer)
+        if(max_throughput_role STREQUAL "tester")
+            add_example(max_throughput_tcp_tester utils/max_throughput/main.c)
         else()
-            add_example(z_perf_tcp_peer unix/c99/z_perf/main_peer.c)
+            add_example(max_throughput_tcp_peer utils/max_throughput/main_peer.c)
         endif()
-        target_sources(z_perf_tcp_${z_perf_role} PRIVATE unix/c99/z_perf/perf_measure.c
-            unix/c99/z_perf/perf_max_throughput.c)
-        target_compile_definitions(z_perf_tcp_${z_perf_role} PRIVATE PERF_TRANSPORT_TCP=1)
-        target_link_libraries(z_perf_tcp_${z_perf_role} PRIVATE Threads::Threads m)
-        set_target_properties(z_perf_tcp_${z_perf_role} PROPERTIES OUTPUT_NAME "z_perf_${z_perf_role}"
-                              RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/z_perf_tcp/bin")
+        target_sources(max_throughput_tcp_${max_throughput_role} PRIVATE utils/max_throughput/perf_measure.c
+            utils/max_throughput/perf_max_throughput.c)
+        target_compile_definitions(max_throughput_tcp_${max_throughput_role} PRIVATE PERF_TRANSPORT_TCP=1)
+        target_link_libraries(max_throughput_tcp_${max_throughput_role} PRIVATE Threads::Threads m)
+        set_target_properties(max_throughput_tcp_${max_throughput_role} PROPERTIES OUTPUT_NAME "max_throughput_${max_throughput_role}"
+                              RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/max_throughput_tcp/bin")
     endforeach()
-    configure_file(unix/c99/z_perf/test_start.sh "${CMAKE_CURRENT_BINARY_DIR}/z_perf_tcp/test_start.sh" COPYONLY)
+    configure_file(utils/max_throughput/test_start.sh "${CMAKE_CURRENT_BINARY_DIR}/max_throughput_tcp/test_start.sh" COPYONLY)
 elseif(MSVC)
     add_example(z_put windows/z_put.c)
     add_example(z_pub windows/z_pub.c)

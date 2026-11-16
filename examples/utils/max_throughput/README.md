@@ -1,10 +1,10 @@
-# z_perf: 최대 처리량 측정 (zenoh-pico)
+# max_throughput: 최대 처리량 측정 (zenoh-pico)
 
 미수신율이 허용 미수신율(2, 3, 5% 중 선택, 기본 2%) 이하로 보낼 수 있는 128 B 메시지의 최대 송신량(msg/s)을 찾는다.
-brightonz.foundation의 z_perf 예제와 같은 측정이다. 탐색·판정 코드(`perf_max_throughput.*`)는 그 예제와 같고, 통신 부분만 zenoh-pico API로 바꿨다.
+brightonz.foundation의 max_throughput 예제와 같은 측정이다. 탐색·판정 코드(`perf_max_throughput.*`)는 그 예제와 같고, 통신 부분만 zenoh-pico API로 바꿨다.
 
-- 보내는 쪽 A: `z_perf_tester`. 500,000 msg/s부터 송신량을 2배씩 올리거나(처음부터 실패하면 절반씩 내리고) 이분 탐색으로 좁힌 뒤, 15초 확인으로 결과를 정한다.
-- 받는 쪽 B: `z_perf_peer`. 받은 결과를 0.25초마다 A에게 돌려준다.
+- 보내는 쪽 A: `max_throughput_tester`. 500,000 msg/s부터 송신량을 2배씩 올리거나(처음부터 실패하면 절반씩 내리고) 이분 탐색으로 좁힌 뒤, 15초 확인으로 결과를 정한다.
+- 받는 쪽 B: `max_throughput_peer`. 받은 결과를 0.25초마다 A에게 돌려준다.
 - 전송: UDP multicast `239.192.0.78:19153` (peer 모드). PC 두 대에서 잰다. loopback은 NIC 드라이버를 거치지 않으므로 쓰지 않는다.
 
 자세한 구조는 `perf_measure.h`, 탐색 순서는 `perf_max_throughput.h` 맨 위 설명에 있다.
@@ -36,7 +36,7 @@ brightonz.foundation의 z_perf 예제와 같은 측정이다. 탐색·판정 코
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DZ_FEATURE_MULTI_THREAD=1 -DZ_FEATURE_MULTICAST_DECLARATIONS=1 -DZ_FEATURE_MULTICAST_LOOPBACK=0 -DBATCH_MULTICAST_SIZE=1450 -DBATCH_UNICAST_SIZE=1450 -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF
-cmake --build build --target z_perf_tester z_perf_peer z_perf_tcp_tester z_perf_tcp_peer
+cmake --build build --target max_throughput_tester max_throughput_peer max_throughput_tcp_tester max_throughput_tcp_peer
 ```
 
 - `Z_FEATURE_MULTICAST_DECLARATIONS=1`: multicast에서도 key를 번호로 선언하고 메시지에 번호만 싣는다.
@@ -50,8 +50,8 @@ cmake --build build --target z_perf_tester z_perf_peer z_perf_tcp_tester z_perf_
 - `BATCH_MULTICAST_SIZE=1450`: UDP 데이터그램 최대 크기. brightonz.foundation 예제의 mtu·batch.length와 같다.
   기본값 2048은 이더넷 MTU(1500)보다 커서 IP 단편화가 생긴다. multicast는 batch 크기를 협상하지 않으므로 두 PC가 같아야 한다.
 - `BATCH_UNICAST_SIZE=1450`: TCP에서 batch 하나의 최대 크기. multicast와 같은 크기로 맞춰, 전송 방식만 바꾼 비교가 되게 한다.
-- 실행 파일은 `build/examples/z_perf/bin/`, 실행 스크립트는 `build/examples/z_perf/test_start.sh`에 생긴다.
-  TCP로 빌드한 것은 `build/examples/z_perf_tcp/`에 같은 이름으로 따로 생긴다 (6장).
+- 실행 파일은 `build/examples/max_throughput/bin/`, 실행 스크립트는 `build/examples/max_throughput/test_start.sh`에 생긴다.
+  TCP로 빌드한 것은 `build/examples/max_throughput_tcp/`에 같은 이름으로 따로 생긴다 (6장).
 - 설정값은 빌드 폴더의 `include/zenoh-pico/config.h`에 생긴다 (소스 폴더는 바뀌지 않는다).
 
 ### 싱글스레드(MT0)로 빌드할 때
@@ -60,7 +60,7 @@ MT1의 `build`와 따로 `build_mt0`에 빌드한다. multicast와 TCP를 잴 �
 
 ```sh
 cmake -S . -B build_mt0 -DCMAKE_BUILD_TYPE=Release -DZ_FEATURE_MULTI_THREAD=0 -DZ_CONFIG_SOCKET_TIMEOUT=1 -DZ_FEATURE_MULTICAST_DECLARATIONS=1 -DZ_FEATURE_MULTICAST_LOOPBACK=0 -DBATCH_MULTICAST_SIZE=1450 -DBATCH_UNICAST_SIZE=1450 -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF
-cmake --build build_mt0 --target z_perf_tester z_perf_peer z_perf_tcp_tester z_perf_tcp_peer
+cmake --build build_mt0 --target max_throughput_tester max_throughput_peer max_throughput_tcp_tester max_throughput_tcp_peer
 ```
 
 - MT0에는 라이브러리 스레드가 없다. 메인 루프 하나가 `zp_spin_once`(수신 콜백, keep-alive·JOIN 송신, TCP accept),
@@ -77,15 +77,15 @@ cmake --build build_mt0 --target z_perf_tester z_perf_peer z_perf_tcp_tester z_p
 
 ```sh
 # 받는 쪽 PC (먼저)
-cd ~/workspace/zenoh-pico && ./build/examples/z_perf/test_start.sh peer ~/zperf_logs/zp
+cd ~/workspace/zenoh-pico && ./build/examples/max_throughput/test_start.sh peer ~/zperf_logs/zp
 
 # 보내는 쪽 PC
-cd ~/workspace/zenoh-pico && ./build/examples/z_perf/test_start.sh tester ~/zperf_logs/zp
+cd ~/workspace/zenoh-pico && ./build/examples/max_throughput/test_start.sh tester ~/zperf_logs/zp
 ```
 
 - 3회 측정해 중앙값을 보고한다. 한 회차는 1분쯤, 전체는 약 3분 걸린다. 측정 중에는 두 PC를 쓰지 않는다.
 - 허용 미수신율은 보내는 쪽에서 `LOSS_PCT`로 고른다 (2, 3, 5. 주지 않으면 2).
-  예: `LOSS_PCT=3 ./build/examples/z_perf/test_start.sh tester ~/zperf_logs/zp`.
+  예: `LOSS_PCT=3 ./build/examples/max_throughput/test_start.sh tester ~/zperf_logs/zp`.
   한 단계의 미수신 수가 그 단계에 보낸 수의 이 % 이하이고 목표의 95% 이상 보냈으면 통과다.
 - 결과는 보내는 쪽 PC의 `result_summary.txt`에 있다. 회차별 로그는 `tester_log_N.txt`, `peer_log_N.txt`.
 - 스크립트는 바이너리에 든 `#iface=`로 NIC를 확인한다. NIC가 없거나 꺼져 있거나 `lo`이면 시작하지 않는다.
@@ -103,8 +103,8 @@ cd ~/workspace/zenoh-pico && ./build/examples/z_perf/test_start.sh tester ~/zper
   중앙값에서 뺀다. 받는 쪽은 보내는 쪽이 다시 시작된 것(count의 seq가 줄어듦)을 보거나 시작한 뒤 120초 동안
   count가 오지 않으면 끝나고, 보내는 쪽은 자기가 보낸 것보다 큰 seq를 반영한 보고(다른 실행의 받는 쪽)를 버린다.
   두 PC의 로그 첫 줄이 `CPU 고정 …=3 | 클럭 정책 performance | 터보 끔`인지 확인한다.
-- `test_start.sh`를 고쳤거나 받은 뒤에는 `cmake --build build --target z_perf_tester z_perf_peer`를 다시 해야
-  `build/examples/z_perf/test_start.sh`(빌드 때 복사한 사본)에 반영된다.
+- `test_start.sh`를 고쳤거나 받은 뒤에는 `cmake --build build --target max_throughput_tester max_throughput_peer`를 다시 해야
+  `build/examples/max_throughput/test_start.sh`(빌드 때 복사한 사본)에 반영된다.
 
 ## 5. 주의
 
@@ -129,16 +129,16 @@ zenoh-pico 1.10.2는 peer 모드에서 UDP unicast로 기다리는 기능(listen
    #define PERF_LOCATOR "tcp/10.0.128.111:19155" /* B(받는 쪽) PC의 IP와 포트 */
    ```
 
-2. 3장처럼 빌드한다. `z_perf_tcp_tester`, `z_perf_tcp_peer`가 `PERF_TRANSPORT_TCP=1`로 빌드되어
-   `build/examples/z_perf_tcp/bin/`에 생긴다.
-3. 실행은 4장과 같고, 폴더만 `z_perf_tcp`다 (받는 쪽을 먼저). MT0는 `build_mt0/examples/z_perf_tcp/`다:
+2. 3장처럼 빌드한다. `max_throughput_tcp_tester`, `max_throughput_tcp_peer`가 `PERF_TRANSPORT_TCP=1`로 빌드되어
+   `build/examples/max_throughput_tcp/bin/`에 생긴다.
+3. 실행은 4장과 같고, 폴더만 `max_throughput_tcp`다 (받는 쪽을 먼저). MT0는 `build_mt0/examples/max_throughput_tcp/`다:
 
    ```sh
    # 받는 쪽 PC (먼저)
-   cd ~/workspace/zenoh-pico && ./build/examples/z_perf_tcp/test_start.sh peer ~/zperf_logs/zp_tcp
+   cd ~/workspace/zenoh-pico && ./build/examples/max_throughput_tcp/test_start.sh peer ~/zperf_logs/zp_tcp
 
    # 보내는 쪽 PC
-   cd ~/workspace/zenoh-pico && ./build/examples/z_perf_tcp/test_start.sh tester ~/zperf_logs/zp_tcp
+   cd ~/workspace/zenoh-pico && ./build/examples/max_throughput_tcp/test_start.sh tester ~/zperf_logs/zp_tcp
    ```
 
 - 스크립트는 바이너리에 든 `tcp/IP`로 NIC를 찾는다. 받는 쪽은 그 IP를 가진 NIC, 보내는 쪽은 그 IP로 가는 경로의 NIC다.

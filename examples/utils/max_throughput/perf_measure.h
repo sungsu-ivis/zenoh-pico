@@ -1,7 +1,7 @@
 /*
  * 네트워크 성능 측정 예제 (zenoh-pico) - 두 제어기(A, B)가 같이 쓰는 측정 모듈
  *
- * brightonz.foundation의 z_perf 예제(examples/unix/c99/z_perf)와 같은 측정을 zenoh-pico 공개 API로 한다.
+ * brightonz.foundation의 max_throughput 예제(examples/utils/max_throughput)와 같은 측정을 zenoh-pico 공개 API로 한다.
  * 측정 방법·메시지·스레드·출력 형식은 같고, 통신 부분만 zenoh-pico API로 바꿨다.
  *
  * 목적: 허용 미수신율(2, 3, 5% 중 선택, 기본 2%) 이내로 보낼 수 있는 최대 처리량(max throughput)을 찾는다.
@@ -22,10 +22,10 @@
  *
  * 빌드 (저장소 최상위에서. 두 PC 모두 같은 옵션으로)
  *   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBATCH_MULTICAST_SIZE=1450 -DBUILD_SHARED_LIBS=OFF
- *   cmake --build build --target z_perf_tester z_perf_peer
+ *   cmake --build build --target max_throughput_tester max_throughput_peer
  *   - BATCH_MULTICAST_SIZE=1450: brightonz.foundation 예제의 mtu·batch.length와 같다. 기본값 2048은 이더넷
  *     MTU(1500)보다 커서 IP 단편화가 생긴다. multicast는 batch 크기를 협상하지 않으므로 두 PC가 같아야 한다.
- *   - 실행 파일은 build/examples/z_perf/bin/, 실행 스크립트는 build/examples/z_perf/test_start.sh에 생긴다.
+ *   - 실행 파일은 build/examples/max_throughput/bin/, 실행 스크립트는 build/examples/max_throughput/test_start.sh에 생긴다.
  *
  * 데이터 메시지 num0 (128 B)
  *   [seq 4 B][송신 시각 µs 8 B][사용자 데이터 116 B]

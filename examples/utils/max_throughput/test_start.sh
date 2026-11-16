@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# z_perf 최대 처리량 측정 실행 (PC 두 대)
+# max_throughput 최대 처리량 측정 실행 (PC 두 대)
 #
-# 보내는 쪽(제어기 A, z_perf_tester)과 받는 쪽(제어기 B, z_perf_peer)을 서로 다른 PC에서 띄운다.
+# 보내는 쪽(제어기 A, max_throughput_tester)과 받는 쪽(제어기 B, max_throughput_peer)을 서로 다른 PC에서 띄운다.
 # 같은 PC 안(loopback)에서는 패킷이 NIC 드라이버를 거치지 않으므로 측정하지 않는다.
 # 두 PC는 UDP multicast 그룹 하나로 주고받는다. 그룹 주소와 NIC는 main.c / main_peer.c의 PERF_LOCATOR에 있고 바이너리에 그대로 들어간다.
-# TCP unicast로 잴 때는 build/examples/z_perf_tcp/의 이 스크립트를 쓴다 (같은 스크립트, TCP로 빌드한 bin/).
+# TCP unicast로 잴 때는 build/examples/max_throughput_tcp/의 이 스크립트를 쓴다 (같은 스크립트, TCP로 빌드한 bin/).
 #   받는 쪽이 자기 IP로 TCP 연결을 기다리고, 보내는 쪽이 그 IP로 접속한다. 받는 쪽 IP는 endpoint(tcp/IP:포트)에 있다.
 #
 # 순서
 #   1. 받는 쪽 PC  : ./test_start.sh peer [로그 폴더]
-#      z_perf_peer를 RUNS번 차례로 띄운다. 한 회차는 tester가 끝나 count가 5초 동안 끊기면 끝나고,
-#      곧바로 다음 회차의 z_perf_peer를 띄워 기다린다.
+#      max_throughput_peer를 RUNS번 차례로 띄운다. 한 회차는 tester가 끝나 count가 5초 동안 끊기면 끝나고,
+#      곧바로 다음 회차의 max_throughput_peer를 띄워 기다린다.
 #   2. 보내는 쪽 PC: ./test_start.sh tester [로그 폴더]
-#      z_perf_tester를 RUNS번 실행하고 결과의 중앙값을 보고한다.
+#      max_throughput_tester를 RUNS번 실행하고 결과의 중앙값을 보고한다.
 #      회차 사이에 RUN_GAP_S초 쉬어, 받는 쪽이 이전 회차를 끝내고 다시 뜰 시간을 준다.
 #
 # CPU 고정 (iperf3 -A와 같은 방식)
@@ -43,7 +43,7 @@
 #   한 회차는 보통 1분쯤 걸린다 (RUNS=3이면 약 3분).
 #   Ctrl+C를 누르면 지금 회차를 멈추고(요약을 남긴다), 그때까지 끝난 회차로 결과를 낸다.
 #
-# 빌드하면 이 파일이 build/examples/z_perf/test_start.sh로 복사되고, 같은 폴더의 bin/을 실행한다.
+# 빌드하면 이 파일이 build/examples/max_throughput/test_start.sh로 복사되고, 같은 폴더의 bin/을 실행한다.
 
 # source(. 명령)로 실행하면 아래의 exit가 터미널 셸까지 끝내 버리므로, 그 경우에는 실행하지 않는다
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then
@@ -76,7 +76,7 @@ TCP_IP_SOURCE="main.c(보내는 쪽), main_peer.c(받는 쪽)의 TCP PERF_LOCATO
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 case "$ROLE" in
     tester)
-        EXE="${SCRIPT_DIR}/bin/z_perf_tester"
+        EXE="${SCRIPT_DIR}/bin/max_throughput_tester"
         EXE_ARGS=("$LOSS_PCT")
         LOG_PREFIX="tester_log"
         case "$LOSS_PCT" in
@@ -88,7 +88,7 @@ case "$ROLE" in
         esac
         ;;
     peer)
-        EXE="${SCRIPT_DIR}/bin/z_perf_peer"
+        EXE="${SCRIPT_DIR}/bin/max_throughput_peer"
         EXE_ARGS=()
         LOG_PREFIX="peer_log"
         ;;
@@ -101,7 +101,7 @@ esac
 
 if [ ! -x "$EXE" ]; then
     echo "실행 파일이 없습니다: $EXE" >&2
-    echo "빌드 폴더의 test_start.sh(build/examples/z_perf/test_start.sh)를 실행하세요." >&2
+    echo "빌드 폴더의 test_start.sh(build/examples/max_throughput/test_start.sh)를 실행하세요." >&2
     exit 1
 fi
 
@@ -187,7 +187,8 @@ if [ "$PIN_CPUS" -eq 1 ]; then
     launch=(taskset -c "$PIN_CPU")
 fi
 
-if pgrep -x "$(basename "$EXE")" >/dev/null; then
+# 리눅스 프로세스 이름(comm)은 앞 15자만 남으므로 그만큼 잘라서 찾는다 (max_throughput_tester → max_throughput_)
+if pgrep -x "$(basename "$EXE" | cut -c1-15)" >/dev/null; then
     echo "$(basename "$EXE")가 이미 실행 중입니다. 먼저 끝내 주세요." >&2
     exit 1
 fi
