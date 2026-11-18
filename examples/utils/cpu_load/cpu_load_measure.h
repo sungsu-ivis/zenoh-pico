@@ -8,12 +8,13 @@
  *   - 보내는 쪽(A): 정해진 송신량(기본 500,000 msg/s, 128 B 메시지)으로 보낸다. 회선이 받아 주는 양보다 한참 낮게 잡아
  *                   송신이 막히지 않게 한다. 워밍업 3초 뒤 10초 동안을 측정 구간으로 삼는다.
  *   - 받는 쪽(B)  : 받기만 하면서 0.25초마다 수신 결과와 자기 누적 CPU 시간을 status로 돌려준다.
- *   - 결과        : A가 측정 구간의 시작과 끝에 자기 누적 CPU 시간과, 그때 갖고 있던
- *                   가장 최근 status의 B 누적 CPU 시간을 잡아 두 PC의 평균 부하(%)와
- *                   메시지 하나에 쓴 CPU 시간(µs)을 출력한다.
- *                   미수신은 측정 구간 시작 때의 status와 마지막 status의 차이로 센다 (워밍업은 넣지 않는다).
- *                   마지막 status는 A가 송신을 멈춘 뒤 보낸 마지막 count를 반영한 것이어야 한다.
- *                   마무리 동안 그런 status가 오지 않으면(연결이 끊김 등) 측정 끝까지의 미수신을 모르므로 무효다.
+ *   - 결과        : 두 PC의 평균 부하(%), 메시지 하나에 쓴 CPU 시간(µs), 측정 구간의 미수신을 A가 출력한다.
+ *                   측정 구간의 시작과 끝은 A가 count를 보낸 두 순간이다. A는 count를 보낼 때마다 그 순간의
+ *                   보낸 수·시각·누적 CPU 시간을 적어 두고, B는 count가 도착한 순간의 누적 CPU 시간과
+ *                   그 count seq까지의 미수신을 status로 보고한다. 그래서 두 PC의 CPU와 미수신이 같은 구간의 값이다.
+ *                     시작: 워밍업 3초가 지난 뒤 보낸 count 가운데 B의 status에 처음 반영된 것
+ *                     끝  : 측정 10초가 지나 송신을 멈추며 보낸 마지막 count
+ *                   마지막 count를 반영한 status가 마무리 동안 오지 않으면(연결이 끊김 등) 무효다.
  *                   실제 송신량이 목표의 99% 이상이고 미수신이 1% 이하일 때만 유효한 값으로 본다.
  *   CPU 값은 각 PC에서 프로그램을 묶은 코어 하나의 부하다 (cpu_usage.h).
  *   받는 쪽 커널의 수신 인터럽트 처리는 대개 NIC 인터럽트를 받는 다른 코어에서 돌아 이 값에 들어가지 않는다.
@@ -30,6 +31,8 @@
  *   num0   (128 B): A → B. [seq 4 B][채움 124 B]
  *   count  (4 B)  : A → B. [지금까지 보낸 마지막 seq] (실제 시간 0.25초마다)
  *   status (24 B) : B → A. [받은 수, 미수신 수, 집계 기준 seq, 순서 바뀜·중복 수, 누적 CPU 일한 시간 ms, 지난 시간 ms]
+ *                   CPU는 집계 기준 seq의 count가 처음 도착한 순간의 값이다. 미수신은 그 seq까지 받지 못한 수이고,
+ *                   count보다 늦게 도착한 그 seq 이하의 메시지는 도착하면 뺀다.
  *
  * 송신 (A): 1 ms마다 목표 송신량만큼 put한다. congestion control이 BLOCK이라 batch가 차면 zenoh-pico가 put 안에서
  *   내보내고 이어서 넣는다. put이 실패하면 그 1 ms 구간의 나머지는 건너뛴다 (막힌 채로 계속 다시 시도하는 시간이
@@ -37,7 +40,7 @@
  *
  * 스레드 (라이브러리를 Z_FEATURE_MULTI_THREAD=1로 빌드했을 때)
  *   - 스케줄러 : 1 ms마다 깨어 목표 송신량만큼 보내고, count도 보낸다 (A만).
- *                송신을 멈추면 마지막 count를 보내고 끝난다.
+ *                count를 보낼 때마다 그 순간의 상태를 적어 둔다. 송신을 멈추면 마지막 count를 보내고 끝난다.
  *   - 피드백   : 0.25초마다 받은 count·status를 처리하고, status를 보내고(B), 측정 구간을 진행하고(A),
  *                1초마다 한 줄 출력한다. A는 마무리 동안 마지막 count를 다시 보낸다 (하나가 사라져도 되게).
  *   (데이터와 피드백 수신 자체는 zenoh-pico executor 스레드가 콜백으로 처리한다)
@@ -94,11 +97,21 @@ typedef struct {
 /* 받는 쪽이 status로 보내는 것 */
 typedef struct {
     uint32_t received;     /* 누적 수신 수 (순서 바뀜·중복 제외) */
-    uint32_t unreceived;   /* 누적 미수신 수 (상대 count 기준) */
+    uint32_t unreceived;   /* counted_seq까지 받지 못한 누적 수 (늦게 온 것은 도착하면 뺀다) */
     uint32_t counted_seq;  /* 미수신 계산에 쓴 상대 count의 seq (0 = 아직 없음) */
     uint32_t out_of_order; /* 누적: 앞 seq 이하가 온 수 (수신 수에서 뺌) */
-    cpuload_usage_t cpu;   /* 보낸 순간 받는 쪽의 누적 CPU 시간 */
+    cpuload_usage_t cpu;   /* counted_seq의 count가 처음 도착한 순간 받는 쪽의 누적 CPU 시간 */
 } cpuload_report_t;
+
+/* 보내는 쪽이 count를 보낸 순간의 상태. 측정 구간의 시작과 끝은 이 가운데서 고른다 */
+typedef struct {
+    uint32_t seq;        /* count에 실은 seq (= 그때까지 보낸 수) */
+    uint32_t skipped;    /* 그때까지 put 실패로 건너뛴 1 ms 구간 수 */
+    uint64_t at_us;      /* 보낸 시각 */
+    cpuload_usage_t cpu; /* 그때의 누적 CPU 시간 */
+} cpuload_mark_t;
+
+#define CPULOAD_MARK_CAPACITY 16u /* 적어 두는 최근 count 수 (0.25초마다 보내므로 4초 분량) */
 
 /* 보내는 쪽 단계 */
 typedef enum {
@@ -127,25 +140,29 @@ typedef struct {
     /* 송신 (스케줄러만 쓴다. 다른 스레드가 읽는 카운터만 atomic) */
     uint32_t next_seq;      /* 다음 송신에 쓸 seq (1부터). 실패하면 같은 seq로 다시 보낸다 */
     uint64_t next_count_us; /* 다음 count를 보낼 시각 (0 = 아직 정하지 않음) */
-    cpuload_atomic_u32_t published;     /* 보낸 수 (= 마지막으로 보낸 seq) */
-    cpuload_atomic_u32_t skipped_ticks; /* put 실패로 나머지를 건너뛴 1 ms 구간 수 */
+    cpuload_atomic_u32_t published;              /* 보낸 수 (= 마지막으로 보낸 seq) */
+    cpuload_atomic_u32_t skipped_ticks;          /* put 실패로 나머지를 건너뛴 1 ms 구간 수 */
+    cpuload_mark_t marks[CPULOAD_MARK_CAPACITY]; /* 최근 count를 보낸 순간들 (state_lock) */
+    uint32_t mark_total;                         /* 지금까지 적은 수 (state_lock) */
 
     /* 수신 (state_lock) */
     pthread_mutex_t state_lock;
-    bool has_first;             /* 첫 메시지를 받았는가 */
-    uint32_t first_seq;         /* 처음 받은 seq. 미수신은 여기부터 센다 */
-    uint32_t last_seq;          /* 가장 최근 seq */
-    uint32_t received;          /* 누적 수신 수 (순서 바뀜·중복 제외) */
-    uint32_t out_of_order;      /* 앞 seq 이하가 온 수 */
-    uint32_t received_at_count; /* 상대 count가 도착한 순간의 received */
-    bool has_count_mail;        /* 처리하지 않은 count가 있는가 */
-    uint32_t count_mail_seq;    /* 그 count의 seq */
-    uint64_t last_count_us;     /* 상대 count를 마지막으로 받은 시각 (0 = 아직 없음) */
-    bool has_count_seq;         /* 상대 count를 하나라도 처리했는가 */
-    uint32_t last_count_seq;    /* 직전에 처리한 상대 count의 seq. 한 실행 안에서는 줄지 않는다 */
-    bool is_sender_restarted;   /* 받는 쪽: count의 seq가 줄어 보내는 쪽이 다시 시작된 것을 봤다 */
-    cpuload_report_t report;    /* 받는 쪽: 보낼 수신 결과 */
-    bool has_status_mail;       /* 처리하지 않은 status가 있는가 */
+    bool has_first;        /* 첫 메시지를 받았는가 */
+    uint32_t first_seq;    /* 처음 받은 seq. 미수신은 여기부터 센다 */
+    uint32_t last_seq;     /* 가장 최근 seq */
+    uint32_t received;     /* 누적 수신 수 (순서 바뀜·중복 제외) */
+    uint32_t out_of_order; /* 앞 seq 이하가 온 수 */
+    uint32_t received_at_count; /* 상대 count seq 이하로 받은 수: count가 도착한 순간의 received에서 시작해,
+                                   그 뒤 늦게 온 그 seq 이하의 메시지를 더한다 */
+    bool has_count_mail;            /* 처리하지 않은 count가 있는가 */
+    uint32_t count_mail_seq;        /* 가장 최근에 도착한 count의 seq */
+    cpuload_usage_t count_mail_cpu; /* 그 seq의 count가 처음 도착한 순간의 내 누적 CPU 시간 */
+    uint64_t last_count_us;         /* 상대 count를 마지막으로 받은 시각 (0 = 아직 없음) */
+    bool has_count_seq;             /* 상대 count를 하나라도 처리했는가 */
+    uint32_t last_count_seq;  /* 직전에 처리한 상대 count의 seq. 한 실행 안에서는 줄지 않는다 */
+    bool is_sender_restarted; /* 받는 쪽: count의 seq가 줄어 보내는 쪽이 다시 시작된 것을 봤다 */
+    cpuload_report_t report;  /* 받는 쪽: 보낼 수신 결과 */
+    bool has_status_mail;     /* 처리하지 않은 status가 있는가 */
     uint8_t status_mail[CPULOAD_STATUS_BYTES];
     size_t wrong_status_bytes;  /* 크기가 달라 버린 status의 크기 (0 = 없음) */
     uint32_t foreign_status;    /* 다른 실행의 것으로 보고 버린 status 수 */
@@ -156,18 +173,10 @@ typedef struct {
     /* 보내는 쪽 측정 구간 (피드백 전용) */
     cpuload_phase_t phase;
     uint64_t phase_start_us;
-    uint64_t window_start_us;
-    uint64_t window_end_us;
-    uint32_t window_start_published;
-    uint32_t window_end_published;
-    uint32_t window_start_skipped;
-    uint32_t window_end_skipped;
-    cpuload_usage_t window_start_mine;
-    cpuload_usage_t window_end_mine;
-    cpuload_report_t window_start_peer; /* 측정 구간 시작 때 받는 쪽 보고 (미수신·CPU의 시작값) */
-    cpuload_usage_t window_end_peer;
-    bool is_aborted;          /* 받는 쪽 보고가 없거나 끊겨 측정을 멈췄다 */
-    const char* abort_reason; /* 멈춘 까닭 (출력용) */
+    cpuload_mark_t window_start;        /* 측정 구간을 시작한 count를 보낸 순간 */
+    cpuload_report_t window_start_peer; /* 그 count를 반영한 받는 쪽 보고 (미수신·CPU의 시작값) */
+    bool is_aborted;                    /* 받는 쪽 보고가 없거나 끊겨 측정을 멈췄다 */
+    const char* abort_reason;           /* 멈춘 까닭 (출력용) */
 
     /* 1초 출력 (피드백 전용) */
     uint32_t feedback_ticks;
