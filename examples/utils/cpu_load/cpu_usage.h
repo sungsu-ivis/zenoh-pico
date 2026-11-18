@@ -17,15 +17,19 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* 잴 수 있는 CPU 번호의 범위: glibc cpu_set_t 하나(CPU_SETSIZE)와 같다.
+ * CPU가 이보다 많은 커널에서는 affinity를 읽지 못해 재지 않는다 (잘못된 값을 내지 않는다). */
+#define CPULOAD_MAX_CPUS 1024u
+
 /* 잴 코어 정보 (open 때 정하고 그 뒤로는 읽기만 하므로 어느 스레드에서 불러도 된다) */
 typedef struct {
-    bool is_available;   /* /proc/stat과 CPU affinity를 읽을 수 있는가. false면 값이 모두 0이다 */
-    char label[32];      /* 출력 이름: "CPU3", "CPU 8개 평균" */
-    uint64_t cpu_mask;   /* 잴 CPU 번호 (비트 n = CPU n). 64개까지 */
-    uint32_t cpu_count;  /* cpu_mask에 든 CPU 수 */
-    long ticks_per_s;    /* /proc/stat 값의 단위 (USER_HZ, 보통 100) */
-    uint64_t base_idle;  /* 시작할 때까지 쉰 시간 (/proc/stat 단위) */
-    uint64_t base_at_ns; /* 시작한 시각 (CLOCK_MONOTONIC) */
+    bool is_available; /* /proc/stat과 CPU affinity를 읽을 수 있는가. false면 값이 모두 0이다 */
+    char label[32];    /* 출력 이름: "CPU3", "CPU 8개 평균" */
+    uint64_t cpu_mask[CPULOAD_MAX_CPUS / 64u]; /* 잴 CPU 번호 (비트 n = CPU n) */
+    uint32_t cpu_count;                        /* cpu_mask에 든 CPU 수 */
+    long ticks_per_s;                          /* /proc/stat 값의 단위 (USER_HZ, 보통 100) */
+    uint64_t base_idle;                        /* 시작할 때까지 쉰 시간 (/proc/stat 단위) */
+    uint64_t base_at_ns;                       /* 시작한 시각 (CLOCK_MONOTONIC) */
 } cpuload_meter_t;
 
 /* 시작한 뒤의 누적 CPU 시간 */

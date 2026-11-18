@@ -17,8 +17,14 @@ static uint64_t cpuload_now_ns(void) {
     return ((uint64_t)now.tv_sec * 1000000000u) + (uint64_t)now.tv_nsec;
 }
 
-/* /proc/stat에서 mask에 든 CPU들의 쉰 시간(idle + iowait)을 더한다 */
-static bool cpuload_read_idle(uint64_t mask, uint64_t* idle) {
+/* CPU index가 잴 CPU인가 */
+static bool cpuload_is_measured(const cpuload_meter_t* meter, unsigned long index) {
+    if (index >= CPULOAD_MAX_CPUS) return false;
+    return ((meter->cpu_mask[index / 64u] >> (index % 64u)) & 1u) != 0u;
+}
+
+/* /proc/stat에서 잴 CPU들의 쉰 시간(idle + iowait)을 더한다 */
+static bool cpuload_read_idle(const cpuload_meter_t* meter, uint64_t* idle) {
     FILE* file = fopen("/proc/stat", "r");
     if (file == NULL) return false;
     char line[512];
@@ -29,7 +35,7 @@ static bool cpuload_read_idle(uint64_t mask, uint64_t* idle) {
         if ((strncmp(line, "cpu", 3) != 0) || (line[3] < '0') || (line[3] > '9')) continue;
         char* p = &line[3];
         const unsigned long index = strtoul(p, &p, 10);
-        if ((index >= 64u) || ((mask & ((uint64_t)1u << index)) == 0u)) continue;
+        if (!cpuload_is_measured(meter, index)) continue;
         uint64_t fields[5] = {0u};
         for (int i = 0; i < 5; i++) fields[i] = strtoull(p, &p, 10);
         *idle += fields[3] + fields[4];
@@ -47,9 +53,9 @@ void cpuload_meter_open(cpuload_meter_t* meter) {
     CPU_ZERO(&set);
     if (sched_getaffinity(0, sizeof(set), &set) != 0) return;
     int only = -1;
-    for (int i = 0; i < 64; i++) {
+    for (int i = 0; (i < CPU_SETSIZE) && ((unsigned)i < CPULOAD_MAX_CPUS); i++) {
         if (CPU_ISSET(i, &set)) {
-            meter->cpu_mask |= (uint64_t)1u << i;
+            meter->cpu_mask[(unsigned)i / 64u] |= (uint64_t)1u << ((unsigned)i % 64u);
             only = i;
             meter->cpu_count++;
         }
@@ -62,14 +68,14 @@ void cpuload_meter_open(cpuload_meter_t* meter) {
     }
     meter->ticks_per_s = sysconf(_SC_CLK_TCK);
     if (meter->ticks_per_s <= 0) meter->ticks_per_s = 100;
-    meter->is_available = cpuload_read_idle(meter->cpu_mask, &meter->base_idle);
+    meter->is_available = cpuload_read_idle(meter, &meter->base_idle);
     meter->base_at_ns = cpuload_now_ns();
 }
 
 cpuload_usage_t cpuload_meter_read(const cpuload_meter_t* meter) {
     cpuload_usage_t usage = {0u, 0u};
     uint64_t idle;
-    if (!meter->is_available || !cpuload_read_idle(meter->cpu_mask, &idle)) return usage;
+    if (!meter->is_available || !cpuload_read_idle(meter, &idle)) return usage;
     const double elapsed_ms = (double)(cpuload_now_ns() - meter->base_at_ns) / 1e6;
     /* 쉰 시간 (ms, CPU 하나 기준) */
     const double idle_ms = (idle <= meter->base_idle) ? 0.0

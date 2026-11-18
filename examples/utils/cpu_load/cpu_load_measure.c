@@ -278,12 +278,13 @@ static void cpuload_advance_phase(cpuload_node_t* node, uint64_t now, uint32_t p
     const uint64_t elapsed_us = now - node->phase_start_us;
     switch (node->phase) {
         case CPULOAD_PHASE_WARMUP:
-            if ((elapsed_us >= (uint64_t)o->warmup_s * 1000000u) && has_peer_view && (peer->received != 0u)) {
+            /* 받는 쪽이 count를 반영해 미수신을 세기 시작한 뒤에 시작한다 (측정 구간 미수신의 시작값이 있어야 한다) */
+            if ((elapsed_us >= (uint64_t)o->warmup_s * 1000000u) && has_peer_view && (peer->counted_seq != 0u)) {
                 node->window_start_us = now;
                 node->window_start_published = published;
                 node->window_start_skipped = cpuload_counter_get(&node->skipped_ticks);
                 node->window_start_mine = cpuload_meter_read(&node->meter);
-                node->window_start_peer = peer->cpu;
+                node->window_start_peer = *peer;
                 node->phase = CPULOAD_PHASE_MEASURE;
                 node->phase_start_us = now;
                 printf("[%s 측정] 워밍업 끝. 지금부터 %u초 동안 두 PC의 CPU를 잽니다\n\n", node->my_name, o->measure_s);
@@ -395,6 +396,12 @@ static void cpuload_feedback_tick(cpuload_node_t* node) {
                     node->my_name);
             }
         }
+        /* 마무리: 마지막 count를 반영한 보고가 올 때까지 마지막 count를 다시 보낸다 (하나가 사라져도 되게).
+         * 스케줄러가 마지막 count를 보낸 뒤에만 보내므로 두 곳이 동시에 보내지 않는다.
+         * 보고가 오면 멈춰, 받는 쪽이 count가 끊긴 것을 보고 끝나는 시각이 늦어지지 않게 한다 */
+        const bool has_final_report = has_peer_view && (peer.counted_seq == published);
+        if ((node->phase == CPULOAD_PHASE_DRAIN) && !has_final_report && cpuload_flag_get(&node->is_publish_finished))
+            cpuload_send_count(node);
         cpuload_advance_phase(node, now, published, has_peer_view, &peer, last_status_us);
     }
 
@@ -454,6 +461,7 @@ static void* cpuload_scheduler_main(void* arg) {
         cpuload_sleep_until(&next);
     }
     cpuload_send_count(node); /* 마지막 count: 받는 쪽이 최종 미수신 수를 정할 수 있게 */
+    cpuload_flag_set(&node->is_publish_finished, true);
     return NULL;
 }
 
@@ -511,6 +519,7 @@ static void cpuload_run_single_thread(cpuload_node_t* node, volatile sig_atomic_
         now = cpuload_now_us();
         if (is_publishing && cpuload_flag_get(&node->should_stop_publish)) {
             cpuload_send_count(node); /* 마지막 count */
+            cpuload_flag_set(&node->is_publish_finished, true);
             is_publishing = false;
         }
         while (is_publishing && (now >= next_schedule_us)) {
@@ -654,13 +663,22 @@ static void cpuload_print_result(const cpuload_node_t* node) {
     const double actual_rate = (window_s > 0.0) ? (double)window_sent / window_s : 0.0;
     const double achieved_pct = 100.0 * actual_rate / (double)o->rate;
     const uint32_t skipped = node->window_end_skipped - node->window_start_skipped;
-    /* 미수신은 받는 쪽이 처음 받은 메시지부터 센다 (연결되기 전에 보낸 것은 넣지 않는다).
-     * 그래서 분모도 그 뒤로 받아야 했던 수(받은 수 + 미수신 수)다 */
-    const uint32_t lost = node->has_peer_view ? node->peer_view.unreceived : 0u;
-    const uint32_t expected = node->has_peer_view ? node->peer_view.received + lost : 0u;
+    /* 미수신은 측정 구간 시작 때의 받는 쪽 보고와 마지막 보고의 차이다 (워밍업 동안의 값은 넣지 않는다).
+     *   보낸 수   = 마지막 보고의 count seq − 시작 보고의 count seq
+     *   미수신 수 = 마지막 보고의 누적 미수신 − 시작 보고의 누적 미수신
+     * 마지막 보고는 송신을 멈춘 뒤의 마지막 count(= 보낸 수 전체)를 반영한 것이어야 한다.
+     * 그보다 앞선 보고면 그 뒤에 보낸 것의 미수신을 모르므로 무효로 한다 */
+    const uint32_t published_total = cpuload_counter_get(&node->published);
+    const cpuload_report_t* start = &node->window_start_peer;
+    const cpuload_report_t* last = &node->peer_view;
+    const bool has_final_report = node->has_peer_view && (last->counted_seq == published_total);
+    const uint32_t expected = (last->counted_seq > start->counted_seq) ? last->counted_seq - start->counted_seq : 0u;
+    const uint32_t lost = (last->unreceived > start->unreceived) ? last->unreceived - start->unreceived : 0u;
+    const uint32_t out_of_order =
+        (last->out_of_order > start->out_of_order) ? last->out_of_order - start->out_of_order : 0u;
     const double loss_pct = (expected == 0u) ? 0.0 : 100.0 * (double)lost / (double)expected;
     const double mine_pct = cpuload_usage_load_pct(node->window_start_mine, node->window_end_mine);
-    const double peer_pct = cpuload_usage_load_pct(node->window_start_peer, node->window_end_peer);
+    const double peer_pct = cpuload_usage_load_pct(node->window_start_peer.cpu, node->window_end_peer);
     char mine[64];
     char peer[64];
     cpuload_format(mine, sizeof(mine), mine_pct, actual_rate);
@@ -669,6 +687,8 @@ static void cpuload_print_result(const cpuload_node_t* node) {
     const char* verdict = "유효";
     if (achieved_pct < (double)CPULOAD_MIN_ACHIEVED_PCT) {
         verdict = "무효 (목표만큼 보내지 못함. 송신량을 낮춰 다시 재세요)";
+    } else if (!has_final_report) {
+        verdict = "무효 (받는 쪽 마지막 보고가 오지 않아 측정 끝까지의 미수신을 모름. 연결이 끊겼는지 확인)";
     } else if ((expected == 0u) || ((uint64_t)lost * 1000000u > (uint64_t)expected * CPULOAD_MAX_LOSS_PPM)) {
         verdict = "무효 (미수신이 1%를 넘었거나 받는 쪽이 받지 못함)";
     } else if ((mine_pct < 0.0) || (peer_pct < 0.0)) {
@@ -677,10 +697,13 @@ static void cpuload_print_result(const cpuload_node_t* node) {
 
     printf("  실제 송신량 : %.0f msg/s (목표의 %.1f%%), put 실패로 건너뛴 1 ms 구간 %u개\n", actual_rate, achieved_pct,
            skipped);
-    printf("  미수신      : %u개 / 받는 쪽이 받기 시작한 뒤 보낸 %u개 (%.3f%%)\n", lost, expected, loss_pct);
-    if (node->has_peer_view && (node->peer_view.out_of_order != 0u)) {
-        printf("  순서 바뀜   : %u개 (중복·역순, 미수신으로 셈)\n", node->peer_view.out_of_order);
+    if (has_final_report) {
+        printf("  미수신      : %u개 / 측정 구간에 보낸 %u개 (%.3f%%)\n", lost, expected, loss_pct);
+    } else {
+        printf("  미수신      : 알 수 없음 (받는 쪽 마지막 보고는 seq %u까지, 보낸 것은 seq %u까지)\n",
+               last->counted_seq, published_total);
     }
+    if (out_of_order != 0u) printf("  순서 바뀜   : %u개 (중복·역순, 미수신으로 셈)\n", out_of_order);
     printf("  보내는 쪽   : %s\n", mine);
     printf("  받는 쪽     : %s\n", peer);
     printf("  판정        : %s\n", verdict);

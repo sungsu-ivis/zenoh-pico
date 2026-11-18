@@ -11,6 +11,9 @@
  *   - 결과        : A가 측정 구간의 시작과 끝에 자기 누적 CPU 시간과, 그때 갖고 있던
  *                   가장 최근 status의 B 누적 CPU 시간을 잡아 두 PC의 평균 부하(%)와
  *                   메시지 하나에 쓴 CPU 시간(µs)을 출력한다.
+ *                   미수신은 측정 구간 시작 때의 status와 마지막 status의 차이로 센다 (워밍업은 넣지 않는다).
+ *                   마지막 status는 A가 송신을 멈춘 뒤 보낸 마지막 count를 반영한 것이어야 한다.
+ *                   마무리 동안 그런 status가 오지 않으면(연결이 끊김 등) 측정 끝까지의 미수신을 모르므로 무효다.
  *                   실제 송신량이 목표의 99% 이상이고 미수신이 1% 이하일 때만 유효한 값으로 본다.
  *   CPU 값은 각 PC에서 프로그램을 묶은 코어 하나의 부하다 (cpu_usage.h).
  *   받는 쪽 커널의 수신 인터럽트 처리는 대개 NIC 인터럽트를 받는 다른 코어에서 돌아 이 값에 들어가지 않는다.
@@ -34,8 +37,9 @@
  *
  * 스레드 (라이브러리를 Z_FEATURE_MULTI_THREAD=1로 빌드했을 때)
  *   - 스케줄러 : 1 ms마다 깨어 목표 송신량만큼 보내고, count도 보낸다 (A만).
+ *                송신을 멈추면 마지막 count를 보내고 끝난다.
  *   - 피드백   : 0.25초마다 받은 count·status를 처리하고, status를 보내고(B), 측정 구간을 진행하고(A),
- *                1초마다 한 줄 출력한다.
+ *                1초마다 한 줄 출력한다. A는 마무리 동안 마지막 count를 다시 보낸다 (하나가 사라져도 되게).
  *   (데이터와 피드백 수신 자체는 zenoh-pico executor 스레드가 콜백으로 처리한다)
  *
  * 싱글스레드 (Z_FEATURE_MULTI_THREAD=0으로 빌드했을 때)
@@ -160,7 +164,7 @@ typedef struct {
     uint32_t window_end_skipped;
     cpuload_usage_t window_start_mine;
     cpuload_usage_t window_end_mine;
-    cpuload_usage_t window_start_peer;
+    cpuload_report_t window_start_peer; /* 측정 구간 시작 때 받는 쪽 보고 (미수신·CPU의 시작값) */
     cpuload_usage_t window_end_peer;
     bool is_aborted;          /* 받는 쪽 보고가 없거나 끊겨 측정을 멈췄다 */
     const char* abort_reason; /* 멈춘 까닭 (출력용) */
@@ -177,6 +181,7 @@ typedef struct {
     cpuload_atomic_bool_t is_ready; /* 콜백이 상태를 써도 되는가 */
     cpuload_atomic_bool_t is_done;  /* 보내는 쪽: 측정을 마쳤다 (main이 읽는다) */
     cpuload_atomic_bool_t should_stop_publish;
+    cpuload_atomic_bool_t is_publish_finished; /* 보내는 쪽: 송신을 멈추고 마지막 count를 보냈다 */
     cpuload_atomic_bool_t should_stop_feedback;
     pthread_t scheduler_thread;
     pthread_t feedback_thread;
